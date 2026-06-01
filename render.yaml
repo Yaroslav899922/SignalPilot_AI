@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: signalpilot-telegram-bot
+    runtime: python
+    plan: starter
+    buildCommand: python -m pip install -e .
+    startCommand: signalpilot --telegram-bot --journal /var/data/signals.sqlite3
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+    disk:
+      name: signalpilot-data
+      mountPath: /var/data
+      sizeGB: 1
