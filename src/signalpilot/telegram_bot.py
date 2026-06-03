@@ -5,7 +5,7 @@ from html import escape
 from pathlib import Path
 from typing import Callable
 
-from .journal import summarize_journal
+from .journal_backend import summarize_journal
 from .signals import Signal
 from .telegram import TelegramConfig, fetch_updates, format_signal_message, send_message
 

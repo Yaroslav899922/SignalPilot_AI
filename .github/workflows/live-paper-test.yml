@@ -1,0 +1,37 @@
+name: SignalPilot Live Paper Test
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+jobs:
+  live-paper-test:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SIGNALPILOT_JOURNAL_BACKEND: apps_script
+      SIGNALPILOT_JOURNAL_API_URL: ${{ secrets.SIGNALPILOT_JOURNAL_API_URL }}
+      SIGNALPILOT_JOURNAL_API_TOKEN: ${{ secrets.SIGNALPILOT_JOURNAL_API_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install SignalPilot
+        run: python -m pip install -e .
+
+      - name: Generate live paper signals
+        run: python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT --notify
+
+      - name: Evaluate older directional signals
+        run: python -m signalpilot --evaluate --lookahead-candles 6
+
+      - name: Print journal report
+        run: python -m signalpilot --report

@@ -3,7 +3,7 @@
 SignalPilot is an MVP trading-signal assistant for manual crypto trading decisions.
 It analyzes Binance market candles and futures context, calculates basic
 indicators, emits a structured LONG / SHORT / NO TRADE signal, and stores every
-signal in a SQLite journal.
+signal in a local SQLite journal or, for the free server setup, a Google Sheet.
 
 This project does not place orders, does not trade automatically, and does not
 provide any financial guarantee.
@@ -21,9 +21,10 @@ provide any financial guarantee.
 - Signal fields: direction, entry zone, stop, targets, risk/reward, confidence,
   invalidation rule, market regime, close price, futures context, liquidity
   context, and reasons.
-- Journal: SQLite table with one row per generated signal and paper evaluation
-  fields for directional signals. Repeated identical live signals are skipped so
-  rerunning the same market state does not inflate paper-test statistics.
+- Journal: SQLite table for local runs, or Google Sheets through Apps Script for
+  the free GitHub + Google server setup. Repeated identical live signals are
+  skipped so rerunning the same market state does not inflate paper-test
+  statistics.
 - Report: compact CLI summary of live paper-test journal results.
 - Scheduler: optional live paper-test loop that regularly collects signals,
   evaluates older directional signals, and prints a journal report.
@@ -42,6 +43,139 @@ python -m venv .venv
 python -m pip install -e .
 python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT
 ```
+
+## Безкоштовний запуск: GitHub + Google
+
+Це основний шлях без Render, без карти і без billing account.
+
+Проста схема:
+
+- GitHub Actions - це "будильник", який раз на годину запускає SignalPilot.
+- Google Sheet - це журнал, куди пишуться сигнали.
+- Google Apps Script - це маленький приймач команд Telegram і міст між
+  Telegram, Google Sheet та GitHub Actions.
+
+Render лишається тільки optional paid варіантом. Для безкоштовного режиму
+потрібні Google Sheet, Apps Script і GitHub Secrets.
+
+### 1. Створи Google Sheet
+
+1. Відкрий Google Sheets.
+2. Створи нову таблицю.
+3. Назви її, наприклад: `SignalPilot Journal`.
+4. Нічого вручну в таблиці заповнювати не треба. Apps Script сам створить лист
+   `signals` і потрібні колонки.
+
+### 2. Додай Apps Script
+
+1. У Google Sheet натисни `Extensions` -> `Apps Script`.
+2. Відкрий файл `Code.gs`.
+3. Видали стандартний код.
+4. Встав код із файлу [google_apps_script/Code.gs](google_apps_script/Code.gs).
+5. Натисни `Save`.
+
+### 3. Додай Script Properties
+
+У Apps Script відкрий `Project Settings` -> `Script properties` і додай:
+
+```text
+TELEGRAM_BOT_TOKEN = токен від BotFather
+WEBHOOK_SECRET = довгий секретний текст, наприклад signalpilot-webhook-2026
+JOURNAL_API_TOKEN = інший довгий секретний текст, наприклад signalpilot-journal-2026
+GITHUB_TOKEN = GitHub personal access token для запуску workflow
+GITHUB_OWNER = Yaroslav899922
+GITHUB_REPO = SignalPilot_AI
+GITHUB_WORKFLOW_FILE = market-check.yml
+```
+
+Після деплою Apps Script додай ще одну властивість:
+
+```text
+SCRIPT_WEB_APP_URL = URL твого Apps Script Web App
+```
+
+Якщо Apps Script створений прямо з Google Sheet, `SPREADSHEET_ID` можна не
+додавати. Якщо скрипт створений окремо, додай:
+
+```text
+SPREADSHEET_ID = id Google таблиці
+```
+
+`GITHUB_TOKEN` - це не Telegram token. Його треба створити в GitHub:
+
+1. GitHub -> `Settings` -> `Developer settings`.
+2. `Personal access tokens` -> `Fine-grained tokens`.
+3. Обери репозиторій `SignalPilot_AI`.
+4. Дай доступ `Actions: Read and write`.
+5. Скопіюй token і встав у `GITHUB_TOKEN`.
+
+### 4. Задеплой Apps Script як Web App
+
+1. В Apps Script натисни `Deploy` -> `New deployment`.
+2. Тип вибери `Web app`.
+3. `Execute as`: `Me`.
+4. `Who has access`: `Anyone`.
+5. Натисни `Deploy`.
+6. Скопіюй `Web app URL`.
+7. Додай цей URL у Script Property `SCRIPT_WEB_APP_URL`.
+
+Після цього в Apps Script у списку функцій вибери `setTelegramWebhook` і натисни
+`Run`. Google попросить дозволи - це нормально, бо скрипт має писати в таблицю
+і відправляти запити в Telegram/GitHub.
+
+Якщо все добре, у логах буде відповідь Telegram з `"ok":true`.
+
+### 5. Додай GitHub Secrets
+
+У GitHub репозиторії відкрий:
+
+`Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`
+
+Додай:
+
+```text
+TELEGRAM_BOT_TOKEN = токен від BotFather
+TELEGRAM_CHAT_ID = твій канал або chat id для звичайних hourly повідомлень
+SIGNALPILOT_JOURNAL_API_URL = Apps Script Web App URL
+SIGNALPILOT_JOURNAL_API_TOKEN = той самий текст, що JOURNAL_API_TOKEN в Apps Script
+```
+
+Для GitHub Actions backend вмикається так:
+
+```text
+SIGNALPILOT_JOURNAL_BACKEND = apps_script
+```
+
+Це вже прописано у workflow-файлах:
+
+- `.github/workflows/live-paper-test.yml` - автоматичний запуск раз на годину.
+- `.github/workflows/market-check.yml` - ручна перевірка ринку з Telegram.
+
+### 6. Перевір запуск
+
+1. У GitHub відкрий `Actions`.
+2. Вибери `SignalPilot Live Paper Test`.
+3. Натисни `Run workflow`.
+4. Дочекайся завершення.
+5. Перевір Google Sheet: має з'явитися лист `signals`.
+6. Перевір Telegram: мають прийти повідомлення SignalPilot.
+
+Потім у приватному чаті з ботом перевір команди:
+
+```text
+статус
+надай звіт
+є торгова ситуація?
+перевір ринок
+допомога
+```
+
+Команди `статус` і `надай звіт` відповідають одразу з Google Sheet.
+Команди `є торгова ситуація?` і `перевір ринок` запускають GitHub Action, тому
+результат може прийти через 1-3 хвилини.
+
+Важливо: SignalPilot не відкриває угоди. Він тільки аналізує ринок, пише
+paper-test журнал і надсилає підказки для ручного рішення.
 
 ## Windows: запуск без довгих команд
 
@@ -81,9 +215,13 @@ python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT
 `render.yaml` містить налаштування Render worker, щоб Telegram-бот працював на
 сервері з постійним SQLite-журналом у `/var/data/signals.sqlite3`.
 
-Щоб це запустити на сервері, проєкт спочатку треба покласти в Git-репозиторій
-на GitHub, GitLab або Bitbucket. Поточна локальна папка ще не є Git-репозиторієм,
-тому серверний деплой прямо зараз із цієї папки завершити не можна.
+Важливо: Render background worker не є безкоштовним `free`-сервісом. У
+`render.yaml` використано `plan: starter`, тому перед запуском перевір вартість
+у Render Dashboard.
+
+Щоб це запустити на сервері, проєкт має бути в Git-репозиторії на GitHub, GitLab
+або Bitbucket. Поточний репозиторій уже завантажений у GitHub:
+`https://github.com/Yaroslav899922/SignalPilot_AI`.
 
 Простий шлях для сервера:
 

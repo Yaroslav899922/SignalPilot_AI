@@ -15,7 +15,7 @@ from .binance import (
     fetch_order_book_spread_pct,
 )
 from .indicators import add_indicators
-from .journal import save_signal, summarize_journal
+from .journal_backend import save_signal, summarize_journal
 from .market import FuturesContext
 from .paper import backtest_symbol, evaluate_journal
 from .signals import DEFAULT_TIMEFRAMES, Signal, build_multi_timeframe_signal, build_signal

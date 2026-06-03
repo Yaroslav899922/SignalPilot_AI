@@ -38,6 +38,39 @@ class CliTests(unittest.TestCase):
             },
         )
 
+    def test_report_uses_apps_script_backend_from_environment(self):
+        output = io.StringIO()
+        summary = {
+            "signals": 3,
+            "long": 1,
+            "short": 1,
+            "no_trade": 1,
+            "pending": 2,
+            "target_hit": 0,
+            "stop_hit": 0,
+            "no_result": 0,
+            "win_rate": None,
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SIGNALPILOT_JOURNAL_BACKEND": "apps_script",
+                "SIGNALPILOT_JOURNAL_API_URL": "https://script.google.test/exec",
+                "SIGNALPILOT_JOURNAL_API_TOKEN": "journal-token",
+            },
+            clear=True,
+        ):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "summary": summary}),
+            ):
+                with redirect_stdout(output):
+                    exit_code = main(["--report"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue()), summary)
+
     def test_paper_loop_runs_generation_evaluation_and_report_cycles(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "signals.sqlite3"
@@ -110,6 +143,20 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(events, [(str(db_path), "token", "channel")])
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
 
 
 if __name__ == "__main__":

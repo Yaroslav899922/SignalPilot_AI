@@ -7,7 +7,7 @@ import pandas as pd
 
 from .binance import fetch_klines
 from .indicators import add_indicators
-from .journal import load_evaluable_signals, update_signal_evaluation
+from .journal_backend import load_evaluable_signals, update_signal_evaluation
 from .market import FuturesContext
 from .signals import Signal, build_signal
 
