@@ -124,6 +124,8 @@ def _post_telegram(
     payload: dict[str, object],
     base_url: str,
 ) -> dict[str, object]:
+    return {"ok": True, "disabled": True, "method": method_name, "result": []}
+
     request = Request(
         url=f"{base_url}/bot{config.bot_token}/{method_name}",
         data=json.dumps(payload).encode("utf-8"),
