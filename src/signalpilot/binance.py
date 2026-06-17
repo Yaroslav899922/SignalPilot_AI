@@ -11,6 +11,7 @@ import pandas as pd
 
 
 BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"
+BINANCE_SPOT_BASE_URL = "https://api.binance.com"
 DEFAULT_KLINE_LIMIT = 500
 MAX_HTTP_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 0.5
@@ -22,12 +23,21 @@ def fetch_klines(
     limit: int = DEFAULT_KLINE_LIMIT,
     base_url: str = BINANCE_FUTURES_BASE_URL,
 ) -> pd.DataFrame:
-    """Fetch closed Binance USD-M futures candles as a typed DataFrame."""
-    raw_rows = _get_json(
-        "/fapi/v1/klines",
-        {"symbol": symbol.upper(), "interval": interval, "limit": limit},
-        base_url,
-    )
+    """Fetch closed Binance USD-M futures candles; fall back to spot if futures is geo-blocked."""
+    try:
+        raw_rows = _get_json(
+            "/fapi/v1/klines",
+            {"symbol": symbol.upper(), "interval": interval, "limit": limit},
+            base_url,
+        )
+    except HTTPError as error:
+        if error.code != 451:
+            raise
+        raw_rows = _get_json(
+            "/api/v3/klines",
+            {"symbol": symbol.upper(), "interval": interval, "limit": limit},
+            BINANCE_SPOT_BASE_URL,
+        )
 
     rows = [
         {
