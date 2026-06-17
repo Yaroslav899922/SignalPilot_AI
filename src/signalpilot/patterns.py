@@ -180,8 +180,8 @@ def _short_breakout_retest(
 def _context_allows(context: FuturesContext) -> tuple[bool, tuple[str, ...]]:
     allows = True
     reasons: list[str] = []
+
     if context.funding_rate is None:
-        allows = False
         reasons.append("Funding rate unavailable")
     else:
         reasons.append(f"Funding rate is {context.funding_rate * 100:.4f}%")
@@ -189,14 +189,14 @@ def _context_allows(context: FuturesContext) -> tuple[bool, tuple[str, ...]]:
             allows = False
             reasons.append("Funding rate is overheated")
 
-    if context.open_interest is None or context.open_interest <= 0:
-        allows = False
+    if context.open_interest is None:
         reasons.append("Open interest unavailable")
+    elif context.open_interest <= 0:
+        reasons.append("Open interest is invalid")
     else:
         reasons.append(f"Open interest is {context.open_interest:.3f}")
 
     if context.long_short_ratio is None:
-        allows = False
         reasons.append("Long/short ratio unavailable")
     else:
         reasons.append(f"Long/short ratio is {context.long_short_ratio:.3f}")
@@ -205,7 +205,6 @@ def _context_allows(context: FuturesContext) -> tuple[bool, tuple[str, ...]]:
             reasons.append("Long/short ratio is crowded")
 
     if context.spread_pct is None:
-        allows = False
         reasons.append("Order book spread unavailable")
     else:
         reasons.append(f"Order book spread is {context.spread_pct:.4f}%")
