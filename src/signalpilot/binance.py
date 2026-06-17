@@ -11,7 +11,7 @@ import pandas as pd
 
 
 BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"
-BINANCE_SPOT_BASE_URL = "https://api.binance.com"
+BINANCE_SPOT_BASE_URL = "https://data-api.binance.vision"
 DEFAULT_KLINE_LIMIT = 500
 MAX_HTTP_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 0.5
