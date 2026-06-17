@@ -7,7 +7,7 @@ if errorlevel 1 goto fail
 echo Starting hourly paper-test with Telegram notifications.
 echo Keep this window open. Close it to stop.
 echo.
-"%SIGNALPILOT_PYTHON%" -m signalpilot --paper-loop --symbols BTCUSDT ETHUSDT SOLUSDT --run-every-minutes 60 --notify
+"%SIGNALPILOT_PYTHON%" -m signalpilot --paper-loop --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --run-every-minutes 60 --notify
 if errorlevel 1 goto fail
 
 goto end

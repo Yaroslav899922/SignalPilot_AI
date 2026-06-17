@@ -9,6 +9,8 @@ description = "AI-assisted crypto trading signal MVP for manual decisions"
 requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2",
+    "numpy>=1.24",
+    "tzdata",
 ]
 
 [project.optional-dependencies]

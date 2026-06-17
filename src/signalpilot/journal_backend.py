@@ -27,6 +27,9 @@ def update_signal_evaluation(
     max_favorable_price: float | None,
     max_adverse_price: float | None,
     evaluated_at: str | None = None,
+    result_R: float | None = None,
+    baseline_R: float | None = None,
+    edge_R: float | None = None,
 ) -> None:
     _backend().update_signal_evaluation(
         db_path=db_path,
@@ -35,6 +38,9 @@ def update_signal_evaluation(
         max_favorable_price=max_favorable_price,
         max_adverse_price=max_adverse_price,
         evaluated_at=evaluated_at,
+        result_R=result_R,
+        baseline_R=baseline_R,
+        edge_R=edge_R,
     )
 
 

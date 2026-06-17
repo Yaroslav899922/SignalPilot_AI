@@ -6,10 +6,8 @@ from dataclasses import asdict, dataclass
 import pandas as pd
 
 from .binance import fetch_klines
-from .indicators import add_indicators
 from .journal_backend import load_evaluable_signals, update_signal_evaluation
-from .market import FuturesContext
-from .signals import Signal, build_signal
+from .signals import Signal
 
 
 @dataclass(frozen=True)
@@ -20,47 +18,12 @@ class EvaluationResult:
     outcome: str
     max_favorable_price: float | None
     max_adverse_price: float | None
+    result_R: float | None = None
+    baseline_R: float | None = None
+    edge_R: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
-
-
-@dataclass(frozen=True)
-class BacktestSignal:
-    symbol: str
-    interval: str
-    created_at: str
-    direction: str
-    outcome: str
-    entry_zone: str
-    stop: float | None
-    target: float | None
-    max_favorable_price: float | None
-    max_adverse_price: float | None
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class BacktestSummary:
-    symbol: str
-    interval: str
-    scanned_candles: int
-    directional_signals: int
-    target_hit: int
-    stop_hit: int
-    no_result: int
-    not_enough_data: int
-    futures_context_mode: str = "rule_only_neutral"
-    uses_live_futures_filters: bool = False
-
-    def to_dict(self) -> dict[str, object]:
-        total_resolved = self.target_hit + self.stop_hit
-        win_rate = self.target_hit / total_resolved if total_resolved else None
-        data = asdict(self)
-        data["win_rate"] = win_rate
-        return data
 
 
 def evaluate_journal(
@@ -82,101 +45,12 @@ def evaluate_journal(
             outcome=result.outcome,
             max_favorable_price=result.max_favorable_price,
             max_adverse_price=result.max_adverse_price,
+            result_R=result.result_R,
+            baseline_R=result.baseline_R,
+            edge_R=result.edge_R,
         )
         results.append(result)
     return results
-
-
-def backtest_symbol(
-    symbol: str,
-    interval: str,
-    limit: int,
-    lookahead_candles: int,
-    target_signals: int,
-    fetcher=fetch_klines,
-) -> tuple[BacktestSummary, list[BacktestSignal]]:
-    raw_candles = fetcher(symbol=symbol, interval=interval, limit=limit)
-    enriched = add_indicators(raw_candles)
-    results = backtest_candles(
-        symbol=symbol,
-        interval=interval,
-        candles=enriched,
-        lookahead_candles=lookahead_candles,
-        target_signals=target_signals,
-    )
-    return summarize_backtest(symbol, interval, len(enriched), results), results
-
-
-def backtest_candles(
-    symbol: str,
-    interval: str,
-    candles: pd.DataFrame,
-    lookahead_candles: int,
-    target_signals: int,
-    futures_context: FuturesContext | None = None,
-) -> list[BacktestSignal]:
-    if lookahead_candles <= 0:
-        raise ValueError("lookahead_candles must be greater than zero")
-    if target_signals <= 0:
-        raise ValueError("target_signals must be greater than zero")
-
-    context = futures_context or FuturesContext(
-        funding_rate=0.0,
-        open_interest=1.0,
-        long_short_ratio=1.0,
-        spread_pct=0.0,
-    )
-    signals: list[BacktestSignal] = []
-    max_signal_index = len(candles) - lookahead_candles
-
-    for index in range(1, max_signal_index + 1):
-        historical_window = candles.iloc[:index].copy()
-        signal = build_signal(symbol, interval, historical_window, context)
-        if signal.direction == "NO TRADE":
-            continue
-
-        created_at = _created_at_for_backtest(candles, index - 1)
-        evaluation = evaluate_signal(
-            _evaluation_input(signal, created_at),
-            candles.iloc[index : index + lookahead_candles],
-            lookahead_candles,
-        )
-        signals.append(
-            BacktestSignal(
-                symbol=signal.symbol,
-                interval=signal.interval,
-                created_at=created_at,
-                direction=signal.direction,
-                outcome=evaluation.outcome,
-                entry_zone=signal.entry_zone,
-                stop=signal.stop,
-                target=signal.targets[0] if signal.targets else None,
-                max_favorable_price=evaluation.max_favorable_price,
-                max_adverse_price=evaluation.max_adverse_price,
-            )
-        )
-        if len(signals) >= target_signals:
-            break
-
-    return signals
-
-
-def summarize_backtest(
-    symbol: str,
-    interval: str,
-    scanned_candles: int,
-    signals: list[BacktestSignal],
-) -> BacktestSummary:
-    return BacktestSummary(
-        symbol=symbol.upper(),
-        interval=interval,
-        scanned_candles=scanned_candles,
-        directional_signals=len(signals),
-        target_hit=sum(1 for signal in signals if signal.outcome == "target_hit"),
-        stop_hit=sum(1 for signal in signals if signal.outcome == "stop_hit"),
-        no_result=sum(1 for signal in signals if signal.outcome == "no_result"),
-        not_enough_data=sum(1 for signal in signals if signal.outcome == "not_enough_data"),
-    )
 
 
 def evaluate_signal(
@@ -222,6 +96,9 @@ def evaluate_signal(
         max_adverse = float(window["high"].max())
 
     outcome = _outcome(direction, stop_price, target_price, window)
+    result_R = _result_r(signal, direction, stop_price, target_price, outcome, window)
+    baseline_R = _baseline_r(signal, direction, stop_price, target_price, window)
+    edge_R = _edge_r(result_R, baseline_R)
     return EvaluationResult(
         signal_id=_signal_id(signal),
         symbol=symbol,
@@ -229,6 +106,9 @@ def evaluate_signal(
         outcome=outcome,
         max_favorable_price=round(max_favorable, 2),
         max_adverse_price=round(max_adverse, 2),
+        result_R=result_R,
+        baseline_R=baseline_R,
+        edge_R=edge_R,
     )
 
 
@@ -258,15 +138,105 @@ def _outcome(direction: str, stop: float, target: float, candles: pd.DataFrame) 
     return "no_result"
 
 
+def _result_r(
+    signal: dict[str, object],
+    direction: str,
+    stop: float,
+    target: float,
+    outcome: str,
+    candles: pd.DataFrame,
+) -> float | None:
+    entry = _float_or_none(signal.get("close_price"))
+    if entry is None:
+        return None
+    return _r_for_entry(direction, entry, stop, target, outcome, candles)
+
+
+def _baseline_r(
+    signal: dict[str, object],
+    direction: str,
+    stop: float,
+    target: float,
+    candles: pd.DataFrame,
+) -> float | None:
+    if candles.empty:
+        return None
+    entry = _first_open_or_close(candles)
+    signal_entry = _float_or_none(signal.get("close_price"))
+    if entry is None or signal_entry is None:
+        return None
+    risk = abs(signal_entry - stop)
+    reward = abs(target - signal_entry)
+    if risk <= 0:
+        return None
+    sign = 1 if direction == "LONG" else -1
+    baseline_stop = entry - sign * risk
+    baseline_target = entry + sign * reward
+    outcome = _outcome(direction, baseline_stop, baseline_target, candles)
+    return _r_for_entry(direction, entry, baseline_stop, baseline_target, outcome, candles)
+
+
+def _r_for_entry(
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float,
+    outcome: str,
+    candles: pd.DataFrame,
+) -> float | None:
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    if outcome == "target_hit":
+        return round(abs(target - entry) / risk, 4)
+    if outcome == "stop_hit":
+        return -1.0
+    if outcome == "no_result":
+        mark = _last_close_or_mid(candles)
+        if mark is None:
+            return None
+        value = (mark - entry) / risk if direction == "LONG" else (entry - mark) / risk
+        return round(float(value), 4)
+    return None
+
+
+def _edge_r(result_R: float | None, baseline_R: float | None) -> float | None:
+    if result_R is None or baseline_R is None:
+        return None
+    return round(result_R - baseline_R, 4)
+
+
+def _first_open_or_close(candles: pd.DataFrame) -> float | None:
+    if candles.empty:
+        return None
+    if "open" in candles.columns:
+        return float(candles.iloc[0]["open"])
+    if "close" in candles.columns:
+        return float(candles.iloc[0]["close"])
+    return None
+
+
+def _last_close_or_mid(candles: pd.DataFrame) -> float | None:
+    if candles.empty:
+        return None
+    if "close" in candles.columns:
+        return float(candles.iloc[-1]["close"])
+    high = candles.iloc[-1].get("high") if hasattr(candles.iloc[-1], "get") else None
+    low = candles.iloc[-1].get("low") if hasattr(candles.iloc[-1], "get") else None
+    if high is not None and low is not None:
+        return (float(high) + float(low)) / 2
+    return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
 def _signal_id(signal: dict[str, object]) -> int | None:
     value = signal.get("id")
     return None if value is None else int(value)
-
-
-def _created_at_for_backtest(candles: pd.DataFrame, index: int) -> str:
-    if "open_time" in candles.columns:
-        return pd.to_datetime(candles.iloc[index]["open_time"], utc=True).isoformat()
-    return str(index)
 
 
 def _evaluation_input(signal: Signal, created_at: str) -> dict[str, object]:
@@ -275,6 +245,7 @@ def _evaluation_input(signal: Signal, created_at: str) -> dict[str, object]:
         "created_at": created_at,
         "symbol": signal.symbol,
         "direction": signal.direction,
+        "close_price": signal.close_price,
         "stop": signal.stop,
         "targets_json": json.dumps(signal.targets),
     }

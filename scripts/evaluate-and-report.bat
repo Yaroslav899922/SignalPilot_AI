@@ -4,7 +4,7 @@ setlocal
 call "%~dp0_ensure-local-install.bat"
 if errorlevel 1 goto fail
 
-"%SIGNALPILOT_PYTHON%" -m signalpilot --evaluate --lookahead-candles 6
+"%SIGNALPILOT_PYTHON%" -m signalpilot --evaluate --lookahead-candles 12
 if errorlevel 1 goto fail
 
 "%SIGNALPILOT_PYTHON%" -m signalpilot --report

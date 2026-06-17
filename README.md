@@ -19,12 +19,19 @@ provide any financial guarantee.
   long/short account ratio, and top-of-book spread.
 - Indicators: EMA 20/50/200, RSI 14, ATR 14, recent high/low.
 - Signal fields: direction, entry zone, stop, targets, risk/reward, confidence,
-  invalidation rule, market regime, close price, futures context, liquidity
-  context, and reasons.
+  invalidation rule, trailing plan, pattern name, setup score, market regime,
+  close price, futures context, liquidity context, and reasons.
+- Live chart analyst: modular `market_data -> patterns -> trade_plan -> Signal`
+  flow. The first professional pattern is `breakout_retest`; it only alerts
+  when 4h/1h/15m context, futures filters, stop, target, and minimum setup
+  quality agree.
 - Journal: SQLite table for local runs, or Google Sheets through Apps Script for
   the free GitHub + Google server setup. Repeated identical live signals are
   skipped so rerunning the same market state does not inflate paper-test
   statistics.
+- Measurement loop: evaluated directional alerts store `result_R`,
+  `baseline_R`, and `edge_R` so live ideas can be judged against a simple
+  market-entry baseline instead of only by win/loss.
 - Report: compact CLI summary of live paper-test journal results.
 - Scheduler: optional live paper-test loop that regularly collects signals,
   evaluates older directional signals, and prints a journal report.
@@ -41,7 +48,83 @@ provide any financial guarantee.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
-python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT
+python -m signalpilot --market-status --symbols BTCUSDT ETHUSDT SOLUSDT
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT
+```
+
+## Live Chart Analyst
+
+This is the new forward path. SignalPilot reads public Binance USD-M market
+data, calculates indicators, checks the first modular pattern
+`breakout_retest`, builds a trade plan, writes the idea to the journal, and
+sends Telegram only for directional alerts by default.
+
+No Binance trading permission is needed for this mode. The current data layer
+uses public market endpoints. If an API key is ever added for private account
+read-only work, create a separate key without trading enabled and without
+withdrawal permissions.
+
+Check live data health without journaling an idea:
+
+```powershell
+python -m signalpilot --market-status --symbols BTCUSDT ETHUSDT SOLUSDT
+```
+
+Run the live analyst and journal the result:
+
+```powershell
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT
+```
+
+Send only professional directional alerts to Telegram:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN = "123456:your-bot-token"
+$env:TELEGRAM_CHAT_ID = "123456789"
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --notify
+```
+
+Also send NO TRADE analyses when debugging:
+
+```powershell
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --notify --notify-no-trade
+```
+
+The Telegram alert contains the pattern, setup score, entry zone, stop, target,
+invalidation, trailing plan, futures context, and the safety note that
+SignalPilot does not place trades.
+
+## TradingView Trigger
+
+TradingView is treated as an external trigger, not as the source of truth. A
+TradingView alert can say "my indicator saw something", but SignalPilot still
+checks Binance candles and futures context before sending a Telegram alert.
+
+Example payload:
+
+```json
+{
+  "source": "tradingview",
+  "secret": "your-tradingview-webhook-secret",
+  "ticker": "BINANCE:BTCUSDT.P",
+  "interval": "1h",
+  "indicator": "My private indicator",
+  "direction": "LONG",
+  "message": "Potential retest"
+}
+```
+
+Local check with a TradingView payload:
+
+```powershell
+$env:SIGNALPILOT_TRADINGVIEW_TRIGGER = '{"source":"tradingview","ticker":"BINANCE:BTCUSDT.P","interval":"1h","indicator":"My private indicator","direction":"LONG"}'
+python -m signalpilot --live-analyst --notify
+```
+
+For the Google Apps Script webhook path, add this optional Script Property:
+
+```text
+TRADINGVIEW_WEBHOOK_SECRET = довгий секретний текст для TradingView
 ```
 
 ## Безкоштовний запуск: GitHub + Google
@@ -244,7 +327,7 @@ python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT --interval 1h
 Evaluate logged LONG / SHORT signals after a lookahead window:
 
 ```powershell
-python -m signalpilot --evaluate --lookahead-candles 6
+python -m signalpilot --evaluate --lookahead-candles 12
 ```
 
 View a compact paper-test journal report:
@@ -256,15 +339,15 @@ python -m signalpilot --report
 Daily live paper-test workflow:
 
 ```powershell
-python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT
-python -m signalpilot --evaluate --lookahead-candles 6
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT
+python -m signalpilot --evaluate --lookahead-candles 12
 python -m signalpilot --report
 ```
 
 Run the live paper-test workflow automatically every 60 minutes:
 
 ```powershell
-python -m signalpilot --paper-loop --symbols BTCUSDT ETHUSDT SOLUSDT --run-every-minutes 60
+python -m signalpilot --paper-loop --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --run-every-minutes 60
 ```
 
 Stop the loop with `Ctrl+C`.
@@ -272,7 +355,7 @@ Stop the loop with `Ctrl+C`.
 Run one scheduler cycle for a quick smoke test:
 
 ```powershell
-python -m signalpilot --paper-loop --symbols BTCUSDT ETHUSDT SOLUSDT --max-runs 1
+python -m signalpilot --paper-loop --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --max-runs 1
 ```
 
 Send generated signals to Telegram:
@@ -280,7 +363,7 @@ Send generated signals to Telegram:
 ```powershell
 $env:TELEGRAM_BOT_TOKEN = "123456:your-bot-token"
 $env:TELEGRAM_CHAT_ID = "123456789"
-python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT --notify
+python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --notify
 ```
 
 Run the Telegram command bot for private chat replies:
@@ -327,7 +410,7 @@ statistics should still come from the forward paper journal.
 Run tests:
 
 ```powershell
-python -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 The default journal path is `data/signals.sqlite3`.

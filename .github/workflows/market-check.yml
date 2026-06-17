@@ -5,17 +5,26 @@ on:
     inputs:
       chat_id:
         description: "Telegram chat id that requested the market check"
-        required: true
+        required: false
+      symbols:
+        description: "Space-separated symbols to check"
+        required: false
+        default: "BTCUSDT ETHUSDT SOLUSDT"
+      tradingview_payload:
+        description: "Optional TradingView alert JSON payload"
+        required: false
 
 jobs:
   market-check:
     runs-on: ubuntu-latest
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ github.event.inputs.chat_id }}
-      SIGNALPILOT_JOURNAL_BACKEND: apps_script
+      TELEGRAM_CHAT_ID: ${{ github.event.inputs.chat_id || secrets.TELEGRAM_CHAT_ID }}
+      SIGNALPILOT_JOURNAL_BACKEND: ${{ secrets.SIGNALPILOT_JOURNAL_BACKEND }}
       SIGNALPILOT_JOURNAL_API_URL: ${{ secrets.SIGNALPILOT_JOURNAL_API_URL }}
       SIGNALPILOT_JOURNAL_API_TOKEN: ${{ secrets.SIGNALPILOT_JOURNAL_API_TOKEN }}
+      SIGNALPILOT_SYMBOLS: ${{ github.event.inputs.symbols || 'BTCUSDT ETHUSDT SOLUSDT' }}
+      SIGNALPILOT_TRADINGVIEW_TRIGGER: ${{ github.event.inputs.tradingview_payload }}
 
     steps:
       - name: Checkout
@@ -30,10 +39,10 @@ jobs:
         run: python -m pip install -e .
 
       - name: Check market and reply in Telegram
-        run: python -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT --notify
+        run: python -m signalpilot --live-analyst --symbols $SIGNALPILOT_SYMBOLS --notify
 
       - name: Evaluate older directional signals
-        run: python -m signalpilot --evaluate --lookahead-candles 6
+        run: python -m signalpilot --evaluate --lookahead-candles 12
 
       - name: Print journal report
         run: python -m signalpilot --report

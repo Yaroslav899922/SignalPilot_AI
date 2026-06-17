@@ -38,12 +38,17 @@ def format_signal_message(signal: Signal) -> str:
     long_short_ratio = f"{signal.long_short_ratio:.3f}" if signal.long_short_ratio is not None else "-"
     spread = f"{signal.spread_pct:.4f}%" if signal.spread_pct is not None else "-"
     action = _action(signal.direction)
+    pattern = signal.pattern or "-"
+    setup_score = "-" if signal.setup_score is None else f"{signal.setup_score:.1f}/100"
+    trailing_plan = signal.trailing_plan or "-"
 
     header_lines = [
         f"<b>{_html(signal.symbol)} | {_html(action)}</b>",
         "",
         f"<b>Дія:</b> {_html(action)}",
         f"<b>Таймфрейм:</b> {_html(signal.interval)}",
+        f"<b>Формація:</b> {_html(_pattern(pattern))}",
+        f"<b>Оцінка сетапу:</b> {_html(setup_score)}",
         f"<b>Режим ринку:</b> {_html(_market_regime(signal.market_regime))}",
         f"<b>Поточна ціна:</b> {_html(close_price)}",
         "",
@@ -59,6 +64,7 @@ def format_signal_message(signal: Signal) -> str:
         f"<b>Spread:</b> {_html(spread)} - різниця між купівлею і продажем",
         "",
         f"<b>Інвалідація:</b> {_html(_invalidation(signal.invalidation))}",
+        f"<b>Трейлінг:</b> {_html(_trailing(trailing_plan))}",
         "",
         "<b>Чому так:</b>",
     ]
@@ -191,6 +197,10 @@ def _trend(value: str) -> str:
         "unknown": "невідомо",
         "confirmed": "підтвердив",
         "not_confirmed": "не підтвердив",
+        "compressed": "стиснення",
+        "expanded": "розширення",
+        "normal": "нормальна волатильність",
+        "no_setup": "немає сетапу",
     }.get(value, value)
 
 
@@ -220,10 +230,40 @@ def _invalidation(value: str) -> str:
     if value.startswith("SHORT invalid if price closes beyond stop "):
         stop = value.removeprefix("SHORT invalid if price closes beyond stop ")
         return f"SHORT скасовано, якщо ціна закриється за стопом {stop}"
+    if value.startswith("LONG invalid if 1h closes below retest level "):
+        return value.replace("LONG invalid if", "LONG скасовано, якщо").replace("or stop", "або стоп")
+    if value.startswith("SHORT invalid if 1h closes above retest level "):
+        return value.replace("SHORT invalid if", "SHORT скасовано, якщо").replace("or stop", "або стоп")
     return value
 
 
 def _reason(value: str) -> str:
+    if value.startswith("Pattern breakout_retest LONG:"):
+        return value.replace("Pattern breakout_retest LONG:", "Breakout + retest LONG:")
+    if value.startswith("Pattern breakout_retest SHORT:"):
+        return value.replace("Pattern breakout_retest SHORT:", "Breakout + retest SHORT:")
+    if value == "4h trend supports LONG":
+        return "4h тренд підтримує LONG"
+    if value == "4h trend supports SHORT":
+        return "4h тренд підтримує SHORT"
+    if value.startswith("Retest held:"):
+        return value.replace("Retest held:", "Ретест утримався:")
+    if value.startswith("15m confirmation for "):
+        return value.replace("15m confirmation for", "15m підтвердження для").replace("close above EMA20", "ціна вище EMA20").replace("close below EMA20", "ціна нижче EMA20")
+    if value.startswith("Trailing plan: "):
+        return _trailing(value.removeprefix("Trailing plan: "))
+    if value.startswith("TradingView trigger received"):
+        return "TradingView trigger отримано; SignalPilot перевірив його на Binance-даних"
+    if value.startswith("TradingView trigger payload: "):
+        return "TradingView payload записано для аудиту"
+    if value == "Futures context blocks professional alert":
+        return "Ф'ючерсний контекст блокує професійний алерт"
+    if value == "No breakout + retest setup with clean level, stop, target, and confirmation":
+        return "Немає breakout + retest із чистим рівнем, стопом, ціллю і підтвердженням"
+    if value == "No auto-trading; alert is for manual confirmation and journaling":
+        return "Автоторгівлі немає; це алерт для ручного підтвердження і журналу"
+    if value.startswith("1h volatility is "):
+        return f"1h волатильність: {_trend(value.removeprefix('1h volatility is '))}"
     if value.startswith("Market regime is "):
         return f"Режим ринку: {_trend(value.removeprefix('Market regime is '))}"
     if value.endswith(" regime is up"):
@@ -303,6 +343,8 @@ def _reason(value: str) -> str:
         return "Недостатньо свічок для індикаторів"
     if value.startswith("Not enough indicator data"):
         return "Недостатньо даних індикаторів для 15m/1h/4h"
+    if value.startswith("Not enough complete indicator data"):
+        return "Недостатньо повних даних індикаторів для live-аналізу"
     if value == "ATR is zero; stop distance cannot be calculated":
         return "ATR дорівнює нулю - не можна розрахувати стоп"
     return value
@@ -323,3 +365,22 @@ def _conclusion(direction: str) -> str:
     if direction == "SHORT":
         return "можливий SHORT, але тільки після ручного підтвердження."
     return "потрібна ручна перевірка."
+
+
+def _pattern(value: str) -> str:
+    return {
+        "breakout_retest": "breakout + retest",
+        "-": "-",
+    }.get(value, value)
+
+
+def _trailing(value: str) -> str:
+    translations = {
+        "After +1R, move stop to breakeven; after target 1, trail below 15m EMA20 or latest 15m swing low.": (
+            "Після +1R перенести стоп у беззбиток; після цілі 1 вести стоп під 15m EMA20 або останнім 15m swing low."
+        ),
+        "After +1R, move stop to breakeven; after target 1, trail above 15m EMA20 or latest 15m swing high.": (
+            "Після +1R перенести стоп у беззбиток; після цілі 1 вести стоп над 15m EMA20 або останнім 15m swing high."
+        ),
+    }
+    return translations.get(value, value)

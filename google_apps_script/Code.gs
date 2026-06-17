@@ -22,10 +22,20 @@ const SIGNAL_COLUMNS = [
   "outcome",
   "max_favorable_price",
   "max_adverse_price",
+  "trailing_plan",
+  "pattern",
+  "setup_score",
+  "source",
+  "result_R",
+  "baseline_R",
+  "edge_R",
 ];
 
 function doPost(e) {
   const payload = parsePayload_(e);
+  if (payload.action === "tradingview_alert" || payload.source === "tradingview") {
+    return handleTradingViewWebhook_(payload);
+  }
   if (payload.action) {
     return handleJournalApi_(payload);
   }
@@ -117,6 +127,13 @@ function saveSignal_(signal) {
     "",
     "",
     "",
+    signal.trailing_plan || "",
+    signal.pattern || "",
+    nullable_(signal.setup_score),
+    signal.source || "signalpilot",
+    "",
+    "",
+    "",
   ]);
   return { ok: true, inserted: true, id: nextId };
 }
@@ -131,6 +148,7 @@ function loadEvaluableSignals_() {
       symbol: row.symbol,
       interval: row.interval,
       direction: row.direction,
+      close_price: numberOrNull_(row.close_price),
       stop: numberOrNull_(row.stop),
       targets_json: row.targets_json || "[]",
     }));
@@ -144,6 +162,9 @@ function updateSignalEvaluation_(payload) {
   const outcomeColumn = SIGNAL_COLUMNS.indexOf("outcome");
   const maxFavorableColumn = SIGNAL_COLUMNS.indexOf("max_favorable_price");
   const maxAdverseColumn = SIGNAL_COLUMNS.indexOf("max_adverse_price");
+  const resultRColumn = SIGNAL_COLUMNS.indexOf("result_R");
+  const baselineRColumn = SIGNAL_COLUMNS.indexOf("baseline_R");
+  const edgeRColumn = SIGNAL_COLUMNS.indexOf("edge_R");
 
   for (let index = 1; index < values.length; index += 1) {
     if (Number(values[index][idColumn]) === Number(payload.signal_id)) {
@@ -152,6 +173,9 @@ function updateSignalEvaluation_(payload) {
       sheet.getRange(rowNumber, outcomeColumn + 1).setValue(payload.outcome || "");
       sheet.getRange(rowNumber, maxFavorableColumn + 1).setValue(nullable_(payload.max_favorable_price));
       sheet.getRange(rowNumber, maxAdverseColumn + 1).setValue(nullable_(payload.max_adverse_price));
+      sheet.getRange(rowNumber, resultRColumn + 1).setValue(nullable_(payload.result_R));
+      sheet.getRange(rowNumber, baselineRColumn + 1).setValue(nullable_(payload.baseline_R));
+      sheet.getRange(rowNumber, edgeRColumn + 1).setValue(nullable_(payload.edge_R));
       return;
     }
   }
@@ -196,6 +220,10 @@ function parseCommand_(text) {
 }
 
 function dispatchMarketCheck_(chatId) {
+  dispatchSignalPilotWorkflow_(chatId, "", "");
+}
+
+function dispatchSignalPilotWorkflow_(chatId, symbols, tradingViewPayload) {
   const owner = getProperty_("GITHUB_OWNER");
   const repo = getProperty_("GITHUB_REPO");
   const workflow = getProperty_("GITHUB_WORKFLOW_FILE");
@@ -213,10 +241,30 @@ function dispatchMarketCheck_(chatId) {
       ref: "main",
       inputs: {
         chat_id: String(chatId),
+        symbols: String(symbols || ""),
+        tradingview_payload: String(tradingViewPayload || ""),
       },
     }),
     muteHttpExceptions: true,
   });
+}
+
+function handleTradingViewWebhook_(payload) {
+  const expectedSecret = getProperty_("TRADINGVIEW_WEBHOOK_SECRET");
+  if (expectedSecret && payload.secret !== expectedSecret) {
+    return jsonResponse_({ ok: false, error: "bad tradingview secret" });
+  }
+
+  const chatId = payload.chat_id || getProperty_("TELEGRAM_CHAT_ID");
+  const symbol = normalizeTradingViewSymbol_(payload.symbol || payload.ticker || "");
+  if (chatId) {
+    sendTelegramMessage_(
+      chatId,
+      `<b>TradingView trigger отримано:</b> ${symbol || "невідомий символ"}\nSignalPilot перевірить Binance-дані перед алертом.`
+    );
+  }
+  dispatchSignalPilotWorkflow_(chatId, symbol, JSON.stringify(redactTradingViewPayload_(payload)));
+  return jsonResponse_({ ok: true, dispatched: true, symbol: symbol });
 }
 
 function setTelegramWebhook() {
@@ -299,8 +347,20 @@ function getSignalsSheet_() {
   const headers = sheet.getRange(1, 1, 1, SIGNAL_COLUMNS.length).getValues()[0];
   if (headers.join("") === "") {
     sheet.getRange(1, 1, 1, SIGNAL_COLUMNS.length).setValues([SIGNAL_COLUMNS]);
+  } else {
+    ensureSignalColumns_(sheet, headers);
   }
   return sheet;
+}
+
+function ensureSignalColumns_(sheet, headers) {
+  const existing = headers.map((value) => String(value)).filter((value) => value);
+  const missing = SIGNAL_COLUMNS.filter((column) => !existing.includes(column));
+  if (!missing.length) {
+    return;
+  }
+  const startColumn = existing.length + 1;
+  sheet.getRange(1, startColumn, 1, missing.length).setValues([missing]);
 }
 
 function readRows_(sheet) {
@@ -326,8 +386,27 @@ function signalExists_(rows, signal, targetsJson) {
     String(row.close_price) === String(nullable_(signal.close_price)) &&
     row.entry_zone === (signal.entry_zone || "") &&
     String(row.stop) === String(nullable_(signal.stop)) &&
-    row.targets_json === targetsJson
+    row.targets_json === targetsJson &&
+    (row.pattern || "") === (signal.pattern || "")
   );
+}
+
+function normalizeTradingViewSymbol_(value) {
+  let text = String(value || "").trim().toUpperCase();
+  if (text.includes(":")) {
+    text = text.split(":")[1];
+  }
+  return text.replace(".P", "").replace(".PERP", "").replace("/", "").replace("-", "");
+}
+
+function redactTradingViewPayload_(payload) {
+  const copy = Object.assign({}, payload);
+  ["secret", "token", "password", "api_key", "apikey", "apiSecret", "api_secret"].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(copy, key)) {
+      copy[key] = "<redacted>";
+    }
+  });
+  return copy;
 }
 
 function nextId_(rows) {

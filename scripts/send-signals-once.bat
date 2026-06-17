@@ -4,7 +4,7 @@ setlocal
 call "%~dp0_ensure-local-install.bat"
 if errorlevel 1 goto fail
 
-"%SIGNALPILOT_PYTHON%" -m signalpilot --symbols BTCUSDT ETHUSDT SOLUSDT --notify
+"%SIGNALPILOT_PYTHON%" -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT --notify
 if errorlevel 1 goto fail
 
 goto end

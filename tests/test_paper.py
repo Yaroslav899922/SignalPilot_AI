@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from signalpilot.paper import backtest_candles, evaluate_signal, summarize_backtest
+from signalpilot.paper import evaluate_signal
 
 
 class PaperEvaluationTests(unittest.TestCase):
@@ -37,6 +37,34 @@ class PaperEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "no_result")
 
+    def test_evaluation_calculates_result_and_baseline_r(self):
+        result = evaluate_signal(
+            {
+                "id": 1,
+                "created_at": "2026-05-31T00:00:00+00:00",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "close_price": 100.0,
+                "stop": 95.0,
+                "targets_json": "[110.0]",
+            },
+            pd.DataFrame(
+                {
+                    "open_time": pd.to_datetime(["2026-05-31T01:00:00Z", "2026-05-31T02:00:00Z"], utc=True),
+                    "open": [101.0, 104.0],
+                    "high": [106.0, 112.0],
+                    "low": [100.0, 103.0],
+                    "close": [104.0, 111.0],
+                }
+            ),
+            lookahead_candles=2,
+        )
+
+        self.assertEqual(result.outcome, "target_hit")
+        self.assertEqual(result.result_R, 2.0)
+        self.assertEqual(result.baseline_R, 2.0)
+        self.assertEqual(result.edge_R, 0.0)
+
     def test_not_enough_data(self):
         result = evaluate_signal(
             _signal(direction="LONG", stop=95.0, target=110.0),
@@ -45,36 +73,6 @@ class PaperEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual(result.outcome, "not_enough_data")
-
-    def test_backtest_candles_collects_directional_signals(self):
-        results = backtest_candles(
-            symbol="BTCUSDT",
-            interval="1h",
-            candles=_backtest_candles(),
-            lookahead_candles=2,
-            target_signals=1,
-        )
-
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].direction, "LONG")
-        self.assertEqual(results[0].outcome, "target_hit")
-
-    def test_summarize_backtest_counts_outcomes(self):
-        signals = backtest_candles(
-            symbol="BTCUSDT",
-            interval="1h",
-            candles=_backtest_candles(),
-            lookahead_candles=2,
-            target_signals=1,
-        )
-
-        summary = summarize_backtest("BTCUSDT", "1h", 3, signals)
-
-        self.assertEqual(summary.directional_signals, 1)
-        self.assertEqual(summary.target_hit, 1)
-        self.assertEqual(summary.to_dict()["win_rate"], 1.0)
-        self.assertEqual(summary.to_dict()["futures_context_mode"], "rule_only_neutral")
-        self.assertEqual(summary.to_dict()["uses_live_futures_filters"], False)
 
 
 def _signal(direction: str, stop: float, target: float) -> dict[str, object]:
@@ -86,30 +84,6 @@ def _signal(direction: str, stop: float, target: float) -> dict[str, object]:
         "stop": stop,
         "targets_json": f"[{target}]",
     }
-
-
-def _backtest_candles() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "open_time": pd.to_datetime(
-                [
-                    "2026-05-31T00:00:00Z",
-                    "2026-05-31T01:00:00Z",
-                    "2026-05-31T02:00:00Z",
-                ],
-                utc=True,
-            ),
-            "high": [111.0, 130.0, 131.0],
-            "low": [109.0, 108.0, 112.0],
-            "close": [110.0, 129.0, 130.0],
-            "ema50": [105.0, 106.0, 107.0],
-            "ema200": [100.0, 101.0, 102.0],
-            "rsi14": [60.0, 62.0, 64.0],
-            "atr14": [3.0, 3.0, 3.0],
-            "recent_high20": [109.0, 120.0, 121.0],
-            "recent_low20": [101.0, 102.0, 103.0],
-        }
-    )
 
 
 if __name__ == "__main__":

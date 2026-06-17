@@ -72,6 +72,9 @@ class AppsScriptJournalTests(unittest.TestCase):
                     max_favorable_price=111.0,
                     max_adverse_price=99.0,
                     evaluated_at="2026-06-01T01:00:00+00:00",
+                    result_R=2.0,
+                    baseline_R=1.0,
+                    edge_R=1.0,
                 )
 
         payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
@@ -81,6 +84,9 @@ class AppsScriptJournalTests(unittest.TestCase):
         self.assertEqual(payload["max_favorable_price"], 111.0)
         self.assertEqual(payload["max_adverse_price"], 99.0)
         self.assertEqual(payload["evaluated_at"], "2026-06-01T01:00:00+00:00")
+        self.assertEqual(payload["result_R"], 2.0)
+        self.assertEqual(payload["baseline_R"], 1.0)
+        self.assertEqual(payload["edge_R"], 1.0)
 
     def test_summarize_journal_returns_summary(self):
         summary = {"signals": 2, "long": 1, "short": 0, "no_trade": 1, "win_rate": None}

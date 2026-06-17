@@ -24,8 +24,9 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
             INSERT INTO signals (
                 created_at, symbol, interval, direction, market_regime, close_price,
                 funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
-                risk_reward, confidence, invalidation, reasons_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                risk_reward, confidence, invalidation, reasons_json,
+                trailing_plan, pattern, setup_score, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal.created_at,
@@ -45,6 +46,10 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 signal.confidence,
                 signal.invalidation,
                 json.dumps(signal.reasons),
+                signal.trailing_plan,
+                signal.pattern,
+                signal.setup_score,
+                signal.source,
             ),
         )
         connection.commit()
@@ -64,7 +69,7 @@ def load_evaluable_signals(db_path: str | Path) -> list[dict[str, object]]:
         ensure_schema(connection)
         rows = connection.execute(
             """
-            SELECT id, created_at, symbol, interval, direction, stop, targets_json
+            SELECT id, created_at, symbol, interval, direction, close_price, stop, targets_json
             FROM signals
             WHERE direction IN ('LONG', 'SHORT')
               AND (outcome IS NULL OR outcome = 'not_enough_data')
@@ -90,7 +95,9 @@ def load_signal_rows(db_path: str | Path, limit: int = 500) -> list[dict[str, ob
             SELECT id, created_at, symbol, interval, direction, market_regime, close_price,
                    funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop,
                    targets_json, risk_reward, confidence, invalidation, reasons_json,
-                   evaluated_at, outcome, max_favorable_price, max_adverse_price
+                   evaluated_at, outcome, max_favorable_price, max_adverse_price,
+                   trailing_plan, pattern, setup_score, source,
+                   result_R, baseline_R, edge_R
             FROM signals
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -153,6 +160,9 @@ def update_signal_evaluation(
     max_favorable_price: float | None,
     max_adverse_price: float | None,
     evaluated_at: str | None = None,
+    result_R: float | None = None,
+    baseline_R: float | None = None,
+    edge_R: float | None = None,
 ) -> None:
     connection = sqlite3.connect(Path(db_path))
     try:
@@ -163,7 +173,10 @@ def update_signal_evaluation(
             SET evaluated_at = ?,
                 outcome = ?,
                 max_favorable_price = ?,
-                max_adverse_price = ?
+                max_adverse_price = ?,
+                result_R = ?,
+                baseline_R = ?,
+                edge_R = ?
             WHERE id = ?
             """,
             (
@@ -171,6 +184,9 @@ def update_signal_evaluation(
                 outcome,
                 max_favorable_price,
                 max_adverse_price,
+                result_R,
+                baseline_R,
+                edge_R,
                 signal_id,
             ),
         )
@@ -204,7 +220,14 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             evaluated_at TEXT,
             outcome TEXT,
             max_favorable_price REAL,
-            max_adverse_price REAL
+            max_adverse_price REAL,
+            trailing_plan TEXT NOT NULL DEFAULT '',
+            pattern TEXT NOT NULL DEFAULT '',
+            setup_score REAL,
+            source TEXT NOT NULL DEFAULT 'signalpilot',
+            result_R REAL,
+            baseline_R REAL,
+            edge_R REAL
         )
         """
     )
@@ -227,6 +250,13 @@ _ADDED_COLUMNS = {
     "outcome": "outcome TEXT",
     "max_favorable_price": "max_favorable_price REAL",
     "max_adverse_price": "max_adverse_price REAL",
+    "trailing_plan": "trailing_plan TEXT NOT NULL DEFAULT ''",
+    "pattern": "pattern TEXT NOT NULL DEFAULT ''",
+    "setup_score": "setup_score REAL",
+    "source": "source TEXT NOT NULL DEFAULT 'signalpilot'",
+    "result_R": "result_R REAL",
+    "baseline_R": "baseline_R REAL",
+    "edge_R": "edge_R REAL",
 }
 
 
@@ -249,6 +279,7 @@ def _signal_exists(connection: sqlite3.Connection, signal: Signal, targets_json:
           AND entry_zone = ?
           AND (stop = ? OR (stop IS NULL AND ? IS NULL))
           AND targets_json = ?
+          AND pattern = ?
         LIMIT 1
         """,
         (
@@ -261,6 +292,7 @@ def _signal_exists(connection: sqlite3.Connection, signal: Signal, targets_json:
             signal.stop,
             signal.stop,
             targets_json,
+            signal.pattern,
         ),
     ).fetchone()
     return row is not None
