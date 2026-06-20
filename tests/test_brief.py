@@ -22,7 +22,7 @@ class BriefTests(unittest.TestCase):
         self.assertIn("MACD histogram позитивний і росте", text)
         self.assertIn("<blockquote expandable>", text)
         self.assertIn("<b>Готуватись до LONG:</b>", text)
-        self.assertIn("1h close > $115.00", text)
+        self.assertIn("1h close &gt; $115.00", text)
         self.assertIn("Futures context недоступний з GitHub Actions; brief не блокується.", text)
         self.assertIn("Це контрольний огляд живого ринку, не сигнал на вхід.", text)
 
