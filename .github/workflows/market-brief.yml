@@ -2,16 +2,12 @@ name: SignalPilot Market Brief
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
   schedule:
     - cron: '0 9 * * *'   # Ранковий контроль
     - cron: '0 14 * * *'  # Денний контроль
 
 jobs:
   market-brief:
-    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[send-brief]')
     runs-on: ubuntu-latest
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
