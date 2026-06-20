@@ -19,8 +19,13 @@ def add_indicators(candles: pd.DataFrame) -> pd.DataFrame:
     data["ema200"] = close.ewm(span=200, adjust=False, min_periods=200).mean()
     data["rsi14"] = _rsi(close, 14)
     data["atr14"] = _atr(high, low, close, 14)
+    data["macd"], data["macd_signal"], data["macd_hist"] = _macd(close)
     data["recent_high20"] = high.shift(1).rolling(20).max()
     data["recent_low20"] = low.shift(1).rolling(20).min()
+    if "volume" in data.columns:
+        data["volume_avg20"] = data["volume"].shift(1).rolling(20).mean()
+    else:
+        data["volume_avg20"] = pd.NA
 
     return data
 
@@ -47,3 +52,12 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.S
         axis=1,
     ).max(axis=1)
     return true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
+def _macd(close: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    hist = macd - signal
+    return macd, signal, hist

@@ -12,14 +12,29 @@ class IndicatorTests(unittest.TestCase):
                 "high": [float(value + 1) for value in range(1, 260)],
                 "low": [float(value - 1) for value in range(1, 260)],
                 "close": [float(value) for value in range(1, 260)],
+                "volume": [float(value * 10) for value in range(1, 260)],
             }
         )
 
         result = add_indicators(candles)
 
-        for column in ["ema20", "ema50", "ema200", "rsi14", "atr14", "recent_high20", "recent_low20"]:
+        for column in [
+            "ema20",
+            "ema50",
+            "ema200",
+            "rsi14",
+            "atr14",
+            "macd",
+            "macd_signal",
+            "macd_hist",
+            "recent_high20",
+            "recent_low20",
+            "volume_avg20",
+        ]:
             self.assertIn(column, result.columns)
         self.assertFalse(pd.isna(result.iloc[-1]["atr14"]))
+        self.assertFalse(pd.isna(result.iloc[-1]["macd_hist"]))
+        self.assertFalse(pd.isna(result.iloc[-1]["volume_avg20"]))
 
     def test_ema200_requires_full_warmup(self):
         short_candles = _candles(199)
