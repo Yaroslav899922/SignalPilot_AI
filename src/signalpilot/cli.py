@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .binance import DEFAULT_KLINE_LIMIT
+from .brief import generate_brief
 from .journal_backend import save_signal, summarize_journal
 from .live_analyst import analyze_live_market, format_market_status
 from .market_data import load_live_market_data
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--telegram-poll-interval", type=float, default=1.0)
     parser.add_argument("--telegram-poll-timeout", type=int, default=30)
     parser.add_argument("--telegram-max-polls", type=int, help="Stop Telegram bot after this many polling cycles.")
+    parser.add_argument("--brief", action="store_true", help="Send a market briefing to Telegram.")
     args = parser.parse_args(argv)
 
     journal_path = Path(args.journal)
@@ -78,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         assert telegram_config is not None
         return _run_telegram_bot(args, journal_path, telegram_config)
 
+    if args.brief:
+        _run_brief(args, telegram_config)
+        return 0
+
     if args.market_status:
         _run_market_status(args, telegram_config)
         return 0
@@ -91,6 +97,19 @@ def main(argv: list[str] | None = None) -> int:
 
     _run_live_analysis(args, journal_path, telegram_config)
     return 0
+
+
+def _run_brief(args: argparse.Namespace, telegram_config: TelegramConfig | None) -> None:
+    markets = [
+        load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
+        for symbol in args.symbols
+    ]
+    text = generate_brief(markets)
+    print(json.dumps({"brief": "generated", "symbols": list(args.symbols)}, ensure_ascii=False))
+    if telegram_config is not None:
+        from .telegram import send_message
+        send_message(text, telegram_config)
+        print(json.dumps({"brief": "sent"}, ensure_ascii=False))
 
 
 def _run_paper_loop(args: argparse.Namespace, journal_path: Path, telegram_config: TelegramConfig | None) -> int:

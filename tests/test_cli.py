@@ -16,7 +16,7 @@ class CliTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch(
-                "signalpilot.cli._fetch_futures_context",
+                "signalpilot.cli.load_live_market_data",
                 side_effect=AssertionError("unexpected Binance call"),
             ):
                 with redirect_stdout(output):
@@ -86,7 +86,7 @@ class CliTests(unittest.TestCase):
             def record_report(journal_path):
                 events.append(("report", str(journal_path)))
 
-            with patch("signalpilot.cli._run_signal_generation", side_effect=record_generation):
+            with patch("signalpilot.cli._run_live_analysis", side_effect=record_generation):
                 with patch("signalpilot.cli._run_evaluation", side_effect=record_evaluation):
                     with patch("signalpilot.cli._print_report", side_effect=record_report):
                         with patch("signalpilot.cli.time.sleep") as sleep:
@@ -143,6 +143,33 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(events, [(str(db_path), "token", "channel")])
+
+    def test_brief_with_notify_fetches_market_data_and_sends_telegram(self):
+        output = io.StringIO()
+
+        def fake_market(symbol, intervals, limit):
+            return {"symbol": symbol, "intervals": tuple(intervals), "limit": limit}
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "channel"},
+            clear=True,
+        ):
+            with patch("signalpilot.cli.load_live_market_data", side_effect=fake_market) as fetch_market:
+                with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
+                    with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send_message:
+                        with redirect_stdout(output):
+                            exit_code = main(["--brief", "--notify", "--symbols", "BTCUSDT", "ETHUSDT"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([call.kwargs["symbol"] for call in fetch_market.call_args_list], ["BTCUSDT", "ETHUSDT"])
+        generate_brief.assert_called_once()
+        send_message.assert_called_once()
+        self.assertEqual(send_message.call_args.args[0], "<b>brief</b>")
+        self.assertEqual(send_message.call_args.args[1].bot_token, "token")
+
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(lines, [{"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]}, {"brief": "sent"}])
 
 
 class FakeResponse:
