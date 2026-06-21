@@ -16,14 +16,18 @@ _SESSION_MAP = {
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
-def generate_brief(markets: list[LiveMarketData], now_utc: datetime | None = None) -> str:
+def generate_brief(
+    markets: list[LiveMarketData],
+    now_utc: datetime | None = None,
+    session_label: str | None = None,
+) -> str:
     """Return an HTML-formatted Telegram market briefing from live candle data."""
     now = now_utc or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     now = now.astimezone(_KYIV_TZ)
 
-    session = _SESSION_MAP.get(now.hour, "Ринковий контроль")
+    session = session_label or _SESSION_MAP.get(now.hour, "Ринковий контроль")
     now_str = now.strftime("%d.%m · %H:%M Київ")
     header = f"📊 <b>SignalPilot Market Brief</b>\n{_h(now_str)} · {_h(session)}"
 
@@ -45,9 +49,6 @@ def generate_brief(markets: list[LiveMarketData], now_utc: datetime | None = Non
         "MACD histogram підтверджує напрямок,",
         "обʼєм 1h на пробої &gt; 1.2x avg20,",
         "чіткий стоп і risk/reward мінімум 1:2.",
-        "",
-        _h(_futures_context_note(markets)),
-        "Це контрольний огляд живого ринку, не сигнал на вхід.",
     ]
     return "\n".join(parts)
 
@@ -122,22 +123,6 @@ def _symbols_with_trend(markets: list[LiveMarketData], direction: str) -> list[s
         for market in markets
         if _trend_direction(market.frames.get("4h")) == direction
     ]
-
-
-def _futures_context_note(markets: list[LiveMarketData]) -> str:
-    values = [
-        value
-        for market in markets
-        for value in (
-            market.futures_context.funding_rate,
-            market.futures_context.open_interest,
-            market.futures_context.long_short_ratio,
-            market.futures_context.spread_pct,
-        )
-    ]
-    if all(value is None for value in values):
-        return "Futures context недоступний з GitHub Actions; brief не блокується."
-    return "Futures context частково доступний; якщо даних немає, це не блокує brief."
 
 
 def _setup_block(support: float | None, resistance: float | None) -> str:

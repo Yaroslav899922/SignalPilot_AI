@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--telegram-poll-timeout", type=int, default=30)
     parser.add_argument("--telegram-max-polls", type=int, help="Stop Telegram bot after this many polling cycles.")
     parser.add_argument("--brief", action="store_true", help="Send a market briefing to Telegram.")
+    parser.add_argument("--brief-session", help="Session label to print in a scheduled market brief.")
+    parser.add_argument("--move-alert", action="store_true", help="Send alerts for sharp 15m market moves.")
+    parser.add_argument("--move-threshold-pct", type=float, default=1.5)
     args = parser.parse_args(argv)
 
     journal_path = Path(args.journal)
@@ -57,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--telegram-poll-timeout must be greater than zero")
     if args.telegram_max_polls is not None and args.telegram_max_polls <= 0:
         parser.error("--telegram-max-polls must be greater than zero")
+    if args.move_threshold_pct <= 0:
+        parser.error("--move-threshold-pct must be greater than zero")
 
     try:
         args.tradingview_trigger_obj = _tradingview_trigger(args)
@@ -84,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         _run_brief(args, telegram_config)
         return 0
 
+    if args.move_alert:
+        _run_move_alert(args, telegram_config)
+        return 0
+
     if args.market_status:
         _run_market_status(args, telegram_config)
         return 0
@@ -104,12 +113,34 @@ def _run_brief(args: argparse.Namespace, telegram_config: TelegramConfig | None)
         load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
         for symbol in args.symbols
     ]
-    text = generate_brief(markets)
+    text = generate_brief(markets, session_label=args.brief_session)
     print(json.dumps({"brief": "generated", "symbols": list(args.symbols)}, ensure_ascii=False))
     if telegram_config is not None:
         from .telegram import send_message
         send_message(text, telegram_config)
         print(json.dumps({"brief": "sent"}, ensure_ascii=False))
+
+
+def _run_move_alert(args: argparse.Namespace, telegram_config: TelegramConfig | None) -> None:
+    from .move_alert import generate_move_alerts
+
+    markets = [
+        load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
+        for symbol in args.symbols
+    ]
+    alerts = generate_move_alerts(markets, threshold_pct=args.move_threshold_pct)
+    print(
+        json.dumps(
+            {"move_alert": "checked", "symbols": list(args.symbols), "alerts": len(alerts)},
+            ensure_ascii=False,
+        )
+    )
+    if telegram_config is not None:
+        from .telegram import send_message
+
+        for index, text in enumerate(alerts, start=1):
+            send_message(text, telegram_config)
+            print(json.dumps({"move_alert": "sent", "index": index}, ensure_ascii=False))
 
 
 def _run_paper_loop(args: argparse.Namespace, journal_path: Path, telegram_config: TelegramConfig | None) -> int:

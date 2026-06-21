@@ -163,13 +163,63 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual([call.kwargs["symbol"] for call in fetch_market.call_args_list], ["BTCUSDT", "ETHUSDT"])
-        generate_brief.assert_called_once()
+        generate_brief.assert_called_once_with(
+            [
+                {"symbol": "BTCUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
+                {"symbol": "ETHUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
+            ],
+            session_label=None,
+        )
         send_message.assert_called_once()
         self.assertEqual(send_message.call_args.args[0], "<b>brief</b>")
         self.assertEqual(send_message.call_args.args[1].bot_token, "token")
 
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(lines, [{"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]}, {"brief": "sent"}])
+
+    def test_brief_passes_session_label(self):
+        output = io.StringIO()
+
+        with patch("signalpilot.cli.load_live_market_data", return_value={"symbol": "BTCUSDT"}):
+            with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
+                with redirect_stdout(output):
+                    exit_code = main(["--brief", "--brief-session", "Лондон · open +1h", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(generate_brief.call_args.kwargs["session_label"], "Лондон · open +1h")
+        self.assertEqual(json.loads(output.getvalue()), {"brief": "generated", "symbols": ["BTCUSDT"]})
+
+    def test_move_alert_with_notify_sends_triggered_alerts(self):
+        output = io.StringIO()
+
+        def fake_market(symbol, intervals, limit):
+            return {"symbol": symbol, "intervals": tuple(intervals), "limit": limit}
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "channel"},
+            clear=True,
+        ):
+            with patch("signalpilot.cli.load_live_market_data", side_effect=fake_market):
+                with patch("signalpilot.move_alert.generate_move_alerts", return_value=["<b>alert</b>"]) as alerts:
+                    with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send_message:
+                        with redirect_stdout(output):
+                            exit_code = main(["--move-alert", "--notify", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 0)
+        alerts.assert_called_once()
+        self.assertEqual(alerts.call_args.kwargs["threshold_pct"], 1.5)
+        send_message.assert_called_once()
+        self.assertEqual(send_message.call_args.args[0], "<b>alert</b>")
+
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            lines,
+            [
+                {"move_alert": "checked", "symbols": ["BTCUSDT"], "alerts": 1},
+                {"move_alert": "sent", "index": 1},
+            ],
+        )
 
 
 class FakeResponse:

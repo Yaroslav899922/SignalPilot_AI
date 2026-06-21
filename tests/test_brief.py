@@ -23,8 +23,8 @@ class BriefTests(unittest.TestCase):
         self.assertIn("<blockquote expandable>", text)
         self.assertIn("<b>Готуватись до LONG:</b>", text)
         self.assertIn("1h close &gt; $115.00", text)
-        self.assertIn("Futures context недоступний з GitHub Actions; brief не блокується.", text)
-        self.assertIn("Це контрольний огляд живого ринку, не сигнал на вхід.", text)
+        self.assertNotIn("Futures context недоступний", text)
+        self.assertNotIn("Це контрольний огляд живого ринку", text)
 
     def test_generate_brief_prints_available_futures_context(self):
         text = generate_brief(
@@ -42,7 +42,17 @@ class BriefTests(unittest.TestCase):
         )
 
         self.assertIn("Нью-Йоркська сесія", text)
-        self.assertIn("Futures context частково доступний", text)
+        self.assertNotIn("Futures context частково доступний", text)
+
+    def test_generate_brief_accepts_explicit_session_label(self):
+        text = generate_brief(
+            [_market(FuturesContext())],
+            now_utc=datetime(2026, 6, 21, 15, 48, tzinfo=timezone.utc),
+            session_label="Нью-Йорк · open +1h",
+        )
+
+        self.assertIn("21.06 · 18:48 Київ · Нью-Йорк · open +1h", text)
+        self.assertNotIn("Ринковий контроль", text)
 
 
 def _market(context: FuturesContext) -> LiveMarketData:

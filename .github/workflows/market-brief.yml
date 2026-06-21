@@ -2,9 +2,34 @@ name: SignalPilot Market Brief
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        required: true
+        default: "brief"
+        type: choice
+        options:
+          - brief
+          - move-alert
+      brief_session:
+        description: "Optional brief session label"
+        required: false
+        default: "Ринковий контроль"
   schedule:
-    - cron: '0 9 * * *'   # Ранковий контроль
-    - cron: '0 14 * * *'  # Денний контроль
+    - cron: '7 3 * * *'
+      timezone: "Europe/Kyiv"  # Азія · open +1h
+    - cron: '7 11 * * *'
+      timezone: "Europe/Kyiv"  # Азія · close -1h
+    - cron: '7 12 * * *'
+      timezone: "Europe/Kyiv"  # Лондон · open +1h
+    - cron: '7 19 * * *'
+      timezone: "Europe/Kyiv"  # Лондон · close -1h
+    - cron: '7 17 * * *'
+      timezone: "Europe/Kyiv"  # Нью-Йорк · open +1h
+    - cron: '7 0 * * *'
+      timezone: "Europe/Kyiv"  # Нью-Йорк · close -1h
+    - cron: '5,20,35,50 0,2-23 * * *'
+      timezone: "Europe/Kyiv"  # Move alerts during session windows
 
 jobs:
   market-brief:
@@ -12,6 +37,10 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_SCHEDULE: ${{ github.event.schedule }}
+      DISPATCH_MODE: ${{ inputs.mode }}
+      DISPATCH_BRIEF_SESSION: ${{ inputs.brief_session }}
 
     steps:
       - name: Checkout
@@ -25,5 +54,55 @@ jobs:
       - name: Install SignalPilot
         run: python -m pip install -e .
 
+      - name: Resolve run mode
+        id: run_mode
+        shell: bash
+        run: |
+          mode="${DISPATCH_MODE:-brief}"
+          brief_session="${DISPATCH_BRIEF_SESSION:-Ринковий контроль}"
+
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            case "$EVENT_SCHEDULE" in
+              "7 3 * * *")
+                mode="brief"
+                brief_session="Азія · open +1h"
+                ;;
+              "7 11 * * *")
+                mode="brief"
+                brief_session="Азія · close -1h"
+                ;;
+              "7 12 * * *")
+                mode="brief"
+                brief_session="Лондон · open +1h"
+                ;;
+              "7 19 * * *")
+                mode="brief"
+                brief_session="Лондон · close -1h"
+                ;;
+              "7 17 * * *")
+                mode="brief"
+                brief_session="Нью-Йорк · open +1h"
+                ;;
+              "7 0 * * *")
+                mode="brief"
+                brief_session="Нью-Йорк · close -1h"
+                ;;
+              "5,20,35,50 0,2-23 * * *")
+                mode="move-alert"
+                ;;
+              *)
+                mode="brief"
+                ;;
+            esac
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "brief_session=$brief_session" >> "$GITHUB_OUTPUT"
+
       - name: Send market brief
-        run: python -m signalpilot --brief --notify --symbols BTCUSDT ETHUSDT SOLUSDT
+        if: steps.run_mode.outputs.mode == 'brief'
+        run: python -m signalpilot --brief --notify --brief-session "${{ steps.run_mode.outputs.brief_session }}" --symbols BTCUSDT ETHUSDT SOLUSDT
+
+      - name: Send move alert
+        if: steps.run_mode.outputs.mode == 'move-alert'
+        run: python -m signalpilot --move-alert --notify --move-threshold-pct 1.5 --symbols BTCUSDT ETHUSDT SOLUSDT
