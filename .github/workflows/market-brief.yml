@@ -11,10 +11,20 @@ on:
         options:
           - brief
           - move-alert
-      brief_session:
-        description: "Optional brief session label"
+      brief_session_key:
+        description: "Brief session label"
         required: false
-        default: "Ринковий контроль"
+        default: "post-change-test"
+        type: choice
+        options:
+          - post-change-test
+          - market
+          - asia-open
+          - asia-close
+          - london-open
+          - london-close
+          - new-york-open
+          - new-york-close
   schedule:
     - cron: '7 0 * * *'   # 03:07 Київ · Азія · open +1h
     - cron: '7 8 * * *'   # 11:07 Київ · Азія · close -1h
@@ -33,7 +43,7 @@ jobs:
       EVENT_NAME: ${{ github.event_name }}
       EVENT_SCHEDULE: ${{ github.event.schedule }}
       DISPATCH_MODE: ${{ inputs.mode }}
-      DISPATCH_BRIEF_SESSION: ${{ inputs.brief_session }}
+      DISPATCH_BRIEF_SESSION_KEY: ${{ inputs.brief_session_key }}
 
     steps:
       - name: Checkout
@@ -52,7 +62,36 @@ jobs:
         shell: bash
         run: |
           mode="${DISPATCH_MODE:-brief}"
-          brief_session="${DISPATCH_BRIEF_SESSION:-Ринковий контроль}"
+          brief_session="Ринковий контроль"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            case "${DISPATCH_BRIEF_SESSION_KEY:-post-change-test}" in
+              "post-change-test")
+                brief_session="Тест після правок"
+                ;;
+              "market")
+                brief_session="Ринковий контроль"
+                ;;
+              "asia-open")
+                brief_session="Азія · open +1h"
+                ;;
+              "asia-close")
+                brief_session="Азія · close -1h"
+                ;;
+              "london-open")
+                brief_session="Лондон · open +1h"
+                ;;
+              "london-close")
+                brief_session="Лондон · close -1h"
+                ;;
+              "new-york-open")
+                brief_session="Нью-Йорк · open +1h"
+                ;;
+              "new-york-close")
+                brief_session="Нью-Йорк · close -1h"
+                ;;
+            esac
+          fi
 
           if [[ "$EVENT_NAME" == "schedule" ]]; then
             case "$EVENT_SCHEDULE" in
