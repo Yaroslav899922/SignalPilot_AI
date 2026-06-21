@@ -271,8 +271,8 @@ def build_decisions(sym_data, arm: str):
             plan = plan_mod.pullback_v1(sym_data.symbol, row)
         elif arm == "baseline":
             plan = plan_mod.baseline(sym_data.symbol, row)
-        elif arm == "breakout":
-            plan = plan_mod.breakout(sym_data.symbol, dec.iloc[[i]])
+        elif arm == "pifagor_s1":
+            plan = plan_mod.pifagor_s1(sym_data.symbol, dec, i)
         else:
             raise ValueError(f"unknown arm: {arm}")
         out.append((row.decision_time, plan, trend))

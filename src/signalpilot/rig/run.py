@@ -20,7 +20,6 @@ TRAIN = ("2024-11", "2025-10")
 TEST = ("2025-11", "2026-06")
 
 CONFIGS = [
-    ("breakout-core (4h)", "breakout", "one_window"),
     ("baseline", "baseline", "one_window"),
     ("pullback v1", "pullback_v1", "one_window"),
     ("pullback v1 (until-trend)", "pullback_v1", "until_trend"),
@@ -102,7 +101,7 @@ def build_report(data, pooled):
 
     L.append("\n## A. Baseline-of-record (one-window), TRAIN, видимі\n")
     L.append("| Варіант | Resolved | Expectancy R | 95% CI |\n|---|--:|--:|--:|\n")
-    for lab in ["breakout-core (4h)", p_ow, bl]:
+    for lab in [p_ow, bl]:
         L.append(_srow(lab, T(lab, TRAIN)) + "\n")
     L.append("\nРізниця (важливе для рішення):\n")
     L.append(_diff("pullback v1 − baseline (train)", T(p_ow, TRAIN), T(bl, TRAIN)) + "\n")

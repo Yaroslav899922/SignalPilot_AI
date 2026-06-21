@@ -3,7 +3,6 @@
 A Plan is a frozen intention created at a 4h close:
   * pullback_v1 — limit order inside the EMA50 +/- 0.25*ATR zone (the v1 idea)
   * baseline    — market entry at next open in the direction of the 4h trend
-  * breakout    — the project's current logic (signals.build_signal), market entry
 
 All numbers (zone, stop, target) are frozen at creation: no look-ahead.
 """
@@ -14,9 +13,6 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from ..market import FuturesContext
-from ..signals import build_signal
-
 # v1 defaults (from the measurement spec)
 ZONE_K = 0.25          # zone half-width in ATR around EMA50
 STOP_ATR = 1.0         # stop sits this many ATR beyond the far edge of the zone
@@ -24,8 +20,6 @@ TARGET_ATR = 1.5       # target distance from entry, in ATR
 # baseline defaults
 BASE_STOP_ATR = 1.25
 BASE_TARGET_ATR = 1.5
-
-_NEUTRAL = FuturesContext(funding_rate=0.0, open_interest=1.0, long_short_ratio=1.0, spread_pct=0.0)
 
 
 @dataclass(frozen=True)
@@ -91,12 +85,47 @@ def baseline(symbol: str, row) -> Plan | None:
     return None
 
 
-def breakout(symbol: str, row_frame: pd.DataFrame) -> Plan | None:
-    """Current project logic. row_frame is a 1-row enriched 4h frame (the decision bar)."""
-    signal = build_signal(symbol, "4h", row_frame, _NEUTRAL)
-    if signal.direction not in ("LONG", "SHORT") or signal.stop is None or not signal.targets:
+# --- Pifagor Strategy 1 ("Manipulation on the hour"), mechanical core ---
+# Impulse: candle 2 takes out candle 1's extreme but does NOT retrace past the
+# 50% of candle 1. Fib drawn LOY..HAI of that 2-candle leg. Single limit entry at
+# the 50% retracement, take at 38.2%, stop just beyond 61.8%. No ladder, no
+# averaging-into-losers ("rocket") — those are deliberately left out.
+PIF_ENTRY = 0.5
+PIF_TARGET = 0.382
+PIF_STOP = 0.66      # a hair beyond the 61.8% level
+
+
+def pifagor_s1(symbol: str, dec, i: int) -> Plan | None:
+    if i < 1:
         return None
-    row = row_frame.iloc[0]
-    return Plan(symbol, "breakout", signal.direction, "market", row.decision_time,
-                float(row.close), float(row.atr14),
-                None, float(signal.stop), float(signal.targets[0]), None, None, None, None)
+    c1, c2 = dec.iloc[i - 1], dec.iloc[i]
+    close = float(c2.close)
+    direction = trend(close, float(c2.ema50), float(c2.ema200))
+    high1, low1 = float(c1.high), float(c1.low)
+    high2, low2 = float(c2.high), float(c2.low)
+    mid1 = (high1 + low1) / 2.0
+
+    if direction == "up" and high2 > high1 and low2 > mid1:
+        hai, loy = high2, low1
+        leg = hai - loy
+        if leg <= 0:
+            return None
+        entry = hai - PIF_ENTRY * leg
+        if close <= entry:                 # need room to retrace down into the zone
+            return None
+        return Plan(symbol, "pifagor_s1", "LONG", "limit", c2.decision_time, close,
+                    float(c2.atr14), entry, hai - PIF_STOP * leg, hai - PIF_TARGET * leg,
+                    None, None, loy, hai)
+
+    if direction == "down" and low2 < low1 and high2 < mid1:
+        hai, loy = high1, low2
+        leg = hai - loy
+        if leg <= 0:
+            return None
+        entry = loy + PIF_ENTRY * leg
+        if close >= entry:                 # need room to retrace up into the zone
+            return None
+        return Plan(symbol, "pifagor_s1", "SHORT", "limit", c2.decision_time, close,
+                    float(c2.atr14), entry, loy + PIF_STOP * leg, loy + PIF_TARGET * leg,
+                    None, None, loy, hai)
+    return None
