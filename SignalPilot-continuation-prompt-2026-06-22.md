@@ -41,7 +41,7 @@ and exit geometry where applicable.
 - Додали руку `pifagor_s1` (`src/signalpilot/rig/plans.py`): імпульс із 2 свічок (друга оновлює екстремум, але не коригує далі 50% першої) → фіба LOY..HAI → лімітний вхід 50%, тейк 38.2%, стоп трохи за 61.8%. БЕЗ ladder, БЕЗ "ракети".
 - Додали раннер `src/signalpilot/rig/compare.py` і тест `tests/test_rig_pifagor.py`.
 - Тести: 64/64 OK. Звіт: `reports/rig-pifagor-2026-06-21.md`.
-- Закомітили ЛОКАЛЬНО (НЕ push): `9e2d2c1` "Revive RIG, add Pifagor S1 arm and comparison".
+- Закомітили й 29.06 запушили в `origin/main`: `9e2d2c1` "Revive RIG, add Pifagor S1 arm and comparison".
 
 ВИСНОВОК БЕКТЕСТУ: механічне ядро Pifagor S1 на 4h СТАБІЛЬНО програє baseline.
 - Train: pifagor −0.280R vs baseline −0.037R → різниця −0.244R, month-CI [−0.384, −0.081].
@@ -174,4 +174,11 @@ months_delta_CI
 ---
 
 ## КЛЮЧОВІ КОМІТИ
-- `9e2d2c1` — Revive RIG, add Pifagor S1 arm and comparison (лока
+- `16cdb97` — Make market brief scenarios more actionable (запушено 29.06; GitHub Actions run `28400060896` success, brief sent).
+- `8c12b10` — Add project rules (CLAUDE.md) + next-session prompt (запушено 29.06).
+- `9e2d2c1` — Revive RIG, add Pifagor S1 arm and comparison (запушено 29.06).
+- `aa4e6ce` — Stabilize manual brief session labels.
+- `e3799ca` — Fix market brief UTC schedules.
+- `446d78a` — Add session market briefs and move alerts.
+
+Не змінюй код без мого "погнали" або "працюємо".

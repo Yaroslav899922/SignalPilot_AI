@@ -42,6 +42,18 @@ provide any financial guarantee.
   interest, long/short ratio, or spread, so it is not live-equivalent and should
   not be treated as trading proof.
 
+## RIG Strategy Gate
+
+Rule: no strategy arm is considered working until it has a reproducible RIG
+report against baseline. Reports must separate signal quality, fill mechanics,
+and exit geometry where applicable.
+
+For paired strategy comparisons, report `delta_R = strategy_R -
+context_baseline_R` by `signal_id`, then calculate the mean and month-block CI
+over those deltas. Every month-block CI in the report must show both
+`n_months_delta_CI` and `months_delta_CI` so the sample behind the interval is
+visible.
+
 ## Quick Start
 
 ```powershell
