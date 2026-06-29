@@ -114,6 +114,9 @@ def _run_brief(args: argparse.Namespace, telegram_config: TelegramConfig | None)
         for symbol in args.symbols
     ]
     text = generate_brief(markets, session_label=args.brief_session)
+    print("===SIGNALPILOT-BRIEF-START===")
+    print(text)
+    print("===SIGNALPILOT-BRIEF-END===")
     print(json.dumps({"brief": "generated", "symbols": list(args.symbols)}, ensure_ascii=False))
     if telegram_config is not None:
         from .telegram import send_message

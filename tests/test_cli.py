@@ -174,8 +174,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(send_message.call_args.args[0], "<b>brief</b>")
         self.assertEqual(send_message.call_args.args[1].bot_token, "token")
 
-        lines = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(lines, [{"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]}, {"brief": "sent"}])
+        out = output.getvalue()
+        self.assertIn("===SIGNALPILOT-BRIEF-START===", out)
+        self.assertIn("<b>brief</b>", out)
+        self.assertIn("===SIGNALPILOT-BRIEF-END===", out)
+        status_lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+        self.assertEqual(status_lines, [{"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]}, {"brief": "sent"}])
 
     def test_brief_passes_session_label(self):
         output = io.StringIO()
@@ -187,7 +191,12 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(generate_brief.call_args.kwargs["session_label"], "Лондон · open +1h")
-        self.assertEqual(json.loads(output.getvalue()), {"brief": "generated", "symbols": ["BTCUSDT"]})
+        out = output.getvalue()
+        self.assertIn("===SIGNALPILOT-BRIEF-START===", out)
+        self.assertIn("<b>brief</b>", out)
+        self.assertIn("===SIGNALPILOT-BRIEF-END===", out)
+        status_lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+        self.assertEqual(status_lines, [{"brief": "generated", "symbols": ["BTCUSDT"]}])
 
     def test_move_alert_with_notify_sends_triggered_alerts(self):
         output = io.StringIO()
