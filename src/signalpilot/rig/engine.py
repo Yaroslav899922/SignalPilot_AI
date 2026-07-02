@@ -61,6 +61,7 @@ class _Pending:
     plan: Plan
     hi: float = -math.inf
     lo: float = math.inf
+    age_windows: int = 0
 
 
 @dataclass
@@ -194,7 +195,7 @@ def _trend_supports(direction: str, trend: str | None) -> bool:
 
 
 def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
-                   lifetime: str = "one_window") -> ArmResult:
+                   lifetime: str = "one_window", rest_bars: int = 8) -> ArmResult:
     result = ArmResult(arm=arm, symbol=symbol)
     if not decisions:
         return result
@@ -219,6 +220,17 @@ def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
                         _expire_pending(pending, result)
                         pending = _create_pending(plan, result) if plan is not None else None
                     # else: keep the resting order frozen
+                elif plan is not None:
+                    pending = _create_pending(plan, result)
+            elif lifetime == "rest_bars":
+                if trade is not None:
+                    if plan is not None:
+                        result.plans_blocked += 1
+                elif pending is not None:
+                    pending.age_windows += 1
+                    if plan is not None or pending.age_windows >= rest_bars:
+                        _expire_pending(pending, result)
+                        pending = _create_pending(plan, result) if plan is not None else None
                 elif plan is not None:
                     pending = _create_pending(plan, result)
             else:  # one_window
@@ -263,6 +275,10 @@ def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
 def build_decisions(sym_data, arm: str):
     from . import plans as plan_mod
     dec = sym_data.decisions
+    rev_setups = {}
+    if arm == "reversal_v1":
+        from .reversal import detect_long_reversals
+        rev_setups = {s.idx: s for s in detect_long_reversals(dec)}
     out = []
     for i in range(len(dec)):
         row = dec.iloc[i]
@@ -273,12 +289,19 @@ def build_decisions(sym_data, arm: str):
             plan = plan_mod.baseline(sym_data.symbol, row)
         elif arm == "pifagor_s1":
             plan = plan_mod.pifagor_s1(sym_data.symbol, dec, i)
+        elif arm == "reversal_v1":
+            setup = rev_setups.get(i)
+            plan = Plan(sym_data.symbol, "reversal_v1", "LONG", "limit",
+                        row.decision_time, float(row.close), float(row.atr14),
+                        setup.entry, setup.stop, setup.target,
+                        None, None, None, None) if setup else None
         else:
             raise ValueError(f"unknown arm: {arm}")
         out.append((row.decision_time, plan, trend))
     return out
 
 
-def simulate(sym_data, arm: str, lifetime: str = "one_window") -> ArmResult:
+def simulate(sym_data, arm: str, lifetime: str = "one_window", rest_bars: int = 8) -> ArmResult:
     decisions = build_decisions(sym_data, arm)
-    return simulate_plans(sym_data.symbol, arm, decisions, sym_data.bars15m, lifetime=lifetime)
+    return simulate_plans(sym_data.symbol, arm, decisions, sym_data.bars15m,
+                          lifetime=lifetime, rest_bars=rest_bars)

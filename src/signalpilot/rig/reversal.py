@@ -23,7 +23,7 @@ from .structure import find_swings
 
 N_SWING = 2
 FVG_MIN_ATR = 0.10
-MIN_RANGE_BARS = 3
+RANGE_LOOKBACK = 20   # bars before the sweep to look for the range high
 SWEEP_WINDOW = 12     # max bars from range high to the sweep
 SETUP_WINDOW = 12     # max bars from sweep to the MSS confirmation
 STOP_BUFFER_ATR = 0.25
@@ -79,10 +79,10 @@ def detect_long_reversals(dec: pd.DataFrame) -> list[ReversalSetup]:
         if s is None:
             continue
 
-        # 3. range high = highest confirmed swing high strictly between r and s
+        # 3. range high = highest swing high in the lookback just before the sweep
+        #    (the range's high can form either before or after the range low)
         rh_candidates = [sh for sh in swing_highs
-                         if r < sh.idx < s and sh.price > rl.price
-                         and sh.idx - r >= MIN_RANGE_BARS]
+                         if s - RANGE_LOOKBACK <= sh.idx < s and sh.price > rl.price]
         if not rh_candidates:
             continue
         rh = max(rh_candidates, key=lambda sh: sh.price)
