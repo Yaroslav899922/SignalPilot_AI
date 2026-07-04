@@ -11,7 +11,13 @@ from ..indicators import add_indicators
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "ohlcv"
 EVAL_START = pd.Timestamp("2024-11-01", tz="UTC")
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+SYMBOLS = (
+    # список зафіксовано 2026-07-04 ДО прогону reversal_report (анти-survivorship):
+    # ліквідні на Binance USD-M і торгувались задовго до 2024-09 (старт зрізу).
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    "XRPUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT",
+    "AVAXUSDT", "DOTUSDT", "LTCUSDT", "NEARUSDT",
+)
 
 _INDICATOR_COLUMNS = ["ema50", "ema200", "atr14", "rsi14", "recent_high20", "recent_low20"]
 

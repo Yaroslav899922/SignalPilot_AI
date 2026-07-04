@@ -25,7 +25,12 @@ from urllib.request import urlopen
 import pandas as pd
 
 BASE_URL = "https://fapi.binance.com"
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYMBOLS = [
+    # тримати синхронно з dataset.py::SYMBOLS
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    "XRPUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT",
+    "AVAXUSDT", "DOTUSDT", "LTCUSDT", "NEARUSDT",
+]
 INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 
 # Evaluation window starts here. 4h also needs ~200 candles of warm-up for
