@@ -14,13 +14,13 @@
 | 1 | breakout-core | жива логіка `signals.build_signal` (breakout_retest) | у живому контурі, edge НЕ доведено | expectancy +0.037R, CI накриває 0 | `reports/rig-comparison-2026-06-11.md` | 2026-06-11 |
 | 2 | pullback v1 (EMA50 ± 0.25·ATR) | limit-відкат у бік 4h-тренду | **ЗАКРИТО** | різниця vs baseline від'ємна на train (−0.092R, month-CI накриває 0), нестабільна на test; довше життя ліміту підняло fill-rate 6%→65%, але не expectancy | `reports/rig-comparison-v2-2026-06-11.md` | 2026-06-11 |
 | 3 | Pifagor S1 (механічне ядро) | фіба-вхід 50%, тейк 38.2%, стоп за 61.8% | **ЗАКРИТО** | train: −0.244R vs baseline, month-CI [−0.384, −0.081]; test: −0.471R; критерій не виконано | `reports/rig-pifagor-2026-06-21.md` | 2026-06-21 |
-| 4 | reversal_v1 (sweep + FVG + MSS, LONG) | свіп під range low → бичачий FVG → MSS = вхід | **ВІДКЛАДЕНО** — мала вибірка | expectancy додатна (one_window +0.5R, rest_bars +0.21R), але resolved 2–5 при потребі ≥30; розширюємо символи 3→12, параметри не крутимо | `reports/rig-reversal-2026-07-02.md` | 2026-07-02 |
+| 4 | reversal_v1 (sweep + FVG + MSS, LONG) | свіп під range low → бичачий FVG → MSS = вхід | **СИГНАЛ ПРОТИ** — чекає рішення | на 3 монетах був +R (rest_bars +0.21R, n=2–5); на 12 монетах перевага зникла: expectancy train −0.123R / test −0.294R, різниця з baseline train −0.092R / test −0.281R; критерій воріт НЕ виконано (resolved 22/21 < 30 — формально діагностично). Рішення закрити/збирати ще — за Ярославом | `reports/rig-reversal-2026-07-04.md` | 2026-07-04 |
 
 ## Черга (parking lot)
 
 - SHORT-дзеркало reversal_v1 (окрема гіпотеза, окремий рядок).
 - Варіації reversal: інша точка входу в FVG, ціль = fib-розширення, стоп під fib.
-- Forward-audit живого брифу (порада → результат) — Трек D.
+- ~~Forward-audit живого брифу~~ — зроблено v0: `rig/brief_audit.py` + `reports/brief-audit-2026-07-04.md` (оновлювати новими брифами).
 - RIG для живої breakout_retest; Pifagor 4h attribution sweep.
 - Block-bootstrap замість i.i.d. (монети корельовані ~0.8 — CI зараз занижені).
 
