@@ -111,18 +111,24 @@ def build_report(pooled):
         L.append(f"- train різниця month-CI нижня межа {'>' if passed else '≤'} 0.\n")
         L.append("\n**Критерій " + ("виконано." if passed else "НЕ виконано.") + "**\n")
     else:
-        L.append(f"- Вибірка занадто мала для вироку: rest_bars resolved train={n_rb_train}, "
-                 f"test={n_rb_test} (потрібно ≥ {MIN_N}).\n")
-        L.append("- Напрям **обнадійливий, але недоказовий**: expectancy додатна на обох варіантах "
-                 "(на відміну від baseline ≈ 0 і від Pifagor у мінусі), rest_bars ~подвоює філи "
-                 "проти one_window. Це НЕ перевага за критерієм — це привід зібрати більше даних.\n")
-        L.append("\n**Статус: НЕ закрито і НЕ пройдено — відкладено до більшої вибірки.** "
-                 "Наступний крок — розширити символи (напр. 8–12 монет) і повторити. "
-                 "Дані качати локально (Binance із пісочниці заблокований 451).\n")
+        L.append(f"- Вибірка нижче порогу вироку: rest_bars resolved train={n_rb_train}, "
+                 f"test={n_rb_test} (потрібно ≥ {MIN_N}) — числа діагностичні.\n")
+        exp_tr = M.summarize(_vis(pooled[rb]["trades"], TRAIN))["expectancy_R"]
+        exp_te = M.summarize(_vis(pooled[rb]["trades"], TEST))["expectancy_R"]
+        d_tr = M.difference_ci(_vis(pooled[rb]["trades"], TRAIN), _vis(pooled[bl]["trades"], TRAIN))
+        d_te = M.difference_ci(_vis(pooled[rb]["trades"], TEST), _vis(pooled[bl]["trades"], TEST))
+        sign = "додатна" if exp_tr > 0 and exp_te > 0 else ("відʼємна" if exp_tr < 0 and exp_te < 0 else "змішана")
+        L.append(f"- Діагностичний напрям: expectancy rest_bars {sign} "
+                 f"(train {exp_tr:+.3f}R, test {exp_te:+.3f}R); різниця з baseline "
+                 f"train {d_tr['point']:+.3f}R, test {d_te['point']:+.3f}R.\n")
+        gate_hint = "сигнал ПРОТИ гіпотези" if d_tr["point"] < 0 and d_te["point"] < 0 else (
+            "сигнал ЗА гіпотезу, але недоказовий" if d_tr["point"] > 0 and d_te["point"] > 0 else "сигнал суперечливий")
+        L.append(f"\n**Статус: критерій воріт НЕ виконано на цій вибірці; {gate_hint}.** "
+                 "Рішення (закрити / збирати ще) — окремим записом у HYPOTHESES.md.\n")
 
     L.append("\n## Обмеження (чесно)\n")
-    L.append("- 24 сетапи на 3 монетах за 18 міс — патерн рідкісний; число майже не залежить від "
-             "ширини вікон (перевірено 12–40), тож це не недокрут, а природа патерну.\n")
+    L.append("- Патерн рідкісний (див. Fill-rate вище); на первинній трійці число сетапів майже "
+             "не залежало від ширини вікон (перевірено 12–40) — це природа патерну, не недокрут.\n")
     L.append("- Одне механічне ядро (один вхід, без ladder/докупівель). Повна дискреційна версія інша.\n")
     L.append("- Структура на 4h; автор price-action-школи часто мислить старші ТФ.\n")
     L.append("- 15m лише для торкань; market-fill = open наступної 15m; unresolved виключені з R.\n")
