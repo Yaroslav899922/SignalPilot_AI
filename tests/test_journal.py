@@ -90,6 +90,23 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(rows[0]["targets"], [110.0])
             self.assertEqual(rows[0]["reasons"], ["Breakout", "Risk/reward meets minimum 1:2"])
 
+    def test_saves_market_brief_entry_zone_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            signal = replace(
+                _signal(direction="LONG", created_at="2026-05-31T00:00:00+00:00"),
+                source="market_brief",
+                entry_low=99.0,
+                entry_high=101.0,
+            )
+
+            save_signal(signal, db_path)
+            rows = load_signal_rows(db_path)
+
+        self.assertEqual(rows[0]["entry_low"], 99.0)
+        self.assertEqual(rows[0]["entry_high"], 101.0)
+        self.assertEqual(rows[0]["source"], "market_brief")
+
     def test_save_signal_skips_duplicate_market_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "signals.sqlite3"
@@ -159,9 +176,9 @@ class JournalTests(unittest.TestCase):
             update_signal_evaluation(
                 db_path,
                 signal_id=5,
-                outcome="no_result",
-                max_favorable_price=100.0,
-                max_adverse_price=100.0,
+                outcome="not_activated",
+                max_favorable_price=None,
+                max_adverse_price=None,
             )
 
             summary = summarize_journal(db_path)
@@ -173,7 +190,8 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(summary["pending"], 1)
         self.assertEqual(summary["target_hit"], 1)
         self.assertEqual(summary["stop_hit"], 1)
-        self.assertEqual(summary["no_result"], 1)
+        self.assertEqual(summary["no_result"], 0)
+        self.assertEqual(summary["not_activated"], 1)
         self.assertEqual(summary["win_rate"], 0.5)
 
 

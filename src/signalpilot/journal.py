@@ -24,9 +24,9 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
             INSERT INTO signals (
                 created_at, symbol, interval, direction, market_regime, close_price,
                 funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
-                risk_reward, confidence, invalidation, reasons_json,
+                entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
                 trailing_plan, pattern, setup_score, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal.created_at,
@@ -42,6 +42,8 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 signal.entry_zone,
                 signal.stop,
                 targets_json,
+                signal.entry_low,
+                signal.entry_high,
                 signal.risk_reward,
                 signal.confidence,
                 signal.invalidation,
@@ -69,7 +71,8 @@ def load_evaluable_signals(db_path: str | Path) -> list[dict[str, object]]:
         ensure_schema(connection)
         rows = connection.execute(
             """
-            SELECT id, created_at, symbol, interval, direction, close_price, stop, targets_json
+            SELECT id, created_at, symbol, interval, direction, close_price, entry_low, entry_high,
+                   stop, targets_json, source
             FROM signals
             WHERE direction IN ('LONG', 'SHORT')
               AND (outcome IS NULL OR outcome = 'not_enough_data')
@@ -94,8 +97,8 @@ def load_signal_rows(db_path: str | Path, limit: int = 500) -> list[dict[str, ob
             """
             SELECT id, created_at, symbol, interval, direction, market_regime, close_price,
                    funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop,
-                   targets_json, risk_reward, confidence, invalidation, reasons_json,
-                   evaluated_at, outcome, max_favorable_price, max_adverse_price,
+                   targets_json, entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
+                   activated_at, evaluated_at, outcome, max_favorable_price, max_adverse_price,
                    trailing_plan, pattern, setup_score, source,
                    result_R, baseline_R, edge_R
             FROM signals
@@ -147,6 +150,7 @@ def summarize_journal(db_path: str | Path) -> dict[str, object]:
             "target_hit": target_hit,
             "stop_hit": stop_hit,
             "no_result": outcome_counts.get("no_result", 0),
+            "not_activated": outcome_counts.get("not_activated", 0),
             "win_rate": target_hit / resolved if resolved else None,
         }
     finally:
@@ -163,6 +167,7 @@ def update_signal_evaluation(
     result_R: float | None = None,
     baseline_R: float | None = None,
     edge_R: float | None = None,
+    activated_at: str | None = None,
 ) -> None:
     connection = sqlite3.connect(Path(db_path))
     try:
@@ -170,7 +175,8 @@ def update_signal_evaluation(
         connection.execute(
             """
             UPDATE signals
-            SET evaluated_at = ?,
+            SET activated_at = ?,
+                evaluated_at = ?,
                 outcome = ?,
                 max_favorable_price = ?,
                 max_adverse_price = ?,
@@ -180,6 +186,7 @@ def update_signal_evaluation(
             WHERE id = ?
             """,
             (
+                activated_at,
                 evaluated_at or datetime.now(timezone.utc).isoformat(),
                 outcome,
                 max_favorable_price,
@@ -213,10 +220,13 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             entry_zone TEXT NOT NULL,
             stop REAL,
             targets_json TEXT NOT NULL,
+            entry_low REAL,
+            entry_high REAL,
             risk_reward REAL,
             confidence TEXT NOT NULL,
             invalidation TEXT NOT NULL,
             reasons_json TEXT NOT NULL,
+            activated_at TEXT,
             evaluated_at TEXT,
             outcome TEXT,
             max_favorable_price REAL,
@@ -246,6 +256,9 @@ _ADDED_COLUMNS = {
     "open_interest": "open_interest REAL",
     "long_short_ratio": "long_short_ratio REAL",
     "spread_pct": "spread_pct REAL",
+    "entry_low": "entry_low REAL",
+    "entry_high": "entry_high REAL",
+    "activated_at": "activated_at TEXT",
     "evaluated_at": "evaluated_at TEXT",
     "outcome": "outcome TEXT",
     "max_favorable_price": "max_favorable_price REAL",
@@ -320,5 +333,6 @@ def _empty_summary() -> dict[str, object]:
         "target_hit": 0,
         "stop_hit": 0,
         "no_result": 0,
+        "not_activated": 0,
         "win_rate": None,
     }

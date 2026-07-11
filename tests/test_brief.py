@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from signalpilot.brief import generate_brief
+from signalpilot.brief import build_brief_journal_signals, generate_brief
 from signalpilot.market import FuturesContext
 from signalpilot.market_data import LiveMarketData, MarketFrame
 
@@ -102,6 +102,20 @@ class BriefTests(unittest.TestCase):
         self.assertIn("⚪ NO TRADE — ціна в середині діапазону", text)
         self.assertIn("<b>LONG — ранній від підтримки:</b>", text)
         self.assertIn("<b>SHORT — ранній від опору:</b>", text)
+
+    def test_brief_journal_signal_records_only_the_trend_direction(self):
+        signal = build_brief_journal_signals(
+            [_market(FuturesContext(), four_hour=_uptrend_frame())],
+            now_utc=datetime(2026, 6, 20, 9, 0, tzinfo=timezone.utc),
+        )[0]
+
+        self.assertEqual(signal.direction, "LONG")
+        self.assertEqual(signal.source, "market_brief")
+        self.assertEqual(signal.pattern, "brief_support_retest")
+        self.assertIsNotNone(signal.entry_low)
+        self.assertIsNotNone(signal.entry_high)
+        self.assertGreater(signal.targets[0], signal.entry_high)
+        self.assertLess(signal.stop, signal.entry_low)
 
 
 def _market(

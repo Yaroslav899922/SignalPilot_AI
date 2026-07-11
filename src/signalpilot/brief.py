@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .market_data import LiveMarketData, MarketFrame
+from .signals import Signal
 
 
 _SESSION_MAP = {
@@ -61,6 +62,130 @@ def generate_brief(
         "є чітка інвалідація і наступна ціль.",
     ]
     return "\n".join(parts)
+
+
+def build_brief_journal_signals(
+    markets: list[LiveMarketData],
+    now_utc: datetime | None = None,
+) -> list[Signal]:
+    """Create one measurable plan per market block in a Market Brief.
+
+    A directional plan is evaluated only after price first reaches its entry
+    zone.  A range or unclear market is kept as a NO TRADE journal row, which
+    preserves the full context without pretending that it was an entry.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    created_at = now.astimezone(timezone.utc).isoformat()
+    return [_brief_journal_signal(market, created_at) for market in markets]
+
+
+def _brief_journal_signal(market: LiveMarketData, created_at: str) -> Signal:
+    f1h = market.frames.get("1h")
+    f4h = market.frames.get("4h")
+    row = f1h.candles.iloc[-1] if f1h and not f1h.candles.empty else None
+    price = _val(row, "close") if row is not None else None
+    support = _val(row, "recent_low20") if row is not None else None
+    resistance = _val(row, "recent_high20") if row is not None else None
+    atr = _val(row, "atr14") if row is not None else None
+    regime = _classify_regime(f4h, f1h)
+    context = market.futures_context
+
+    common = {
+        "symbol": market.symbol,
+        "interval": "1h",
+        "market_regime": regime.code,
+        "funding_rate": context.funding_rate,
+        "open_interest": context.open_interest,
+        "long_short_ratio": context.long_short_ratio,
+        "spread_pct": context.spread_pct,
+        "created_at": created_at,
+        "source": "market_brief",
+    }
+
+    if regime.code == "uptrend" and None not in (support, resistance, atr):
+        entry_low = support
+        entry_high = support + 0.5 * atr
+        stop = support - 0.25 * atr
+        target = resistance
+        if target > entry_high and stop < entry_low:
+            return _brief_plan_signal(
+                common,
+                direction="LONG",
+                entry_low=entry_low,
+                entry_high=entry_high,
+                stop=stop,
+                target=target,
+                pattern="brief_support_retest",
+                invalidation=f"1h close нижче {_price(stop)}",
+                reason="Висхідний режим: план LONG лише після повернення в зону підтримки.",
+            )
+
+    if regime.code == "downtrend" and None not in (support, resistance, atr):
+        entry_low = resistance - 0.5 * atr
+        entry_high = resistance
+        stop = resistance + 0.25 * atr
+        target = support
+        if target < entry_low and stop > entry_high:
+            return _brief_plan_signal(
+                common,
+                direction="SHORT",
+                entry_low=entry_low,
+                entry_high=entry_high,
+                stop=stop,
+                target=target,
+                pattern="brief_resistance_retest",
+                invalidation=f"1h close вище {_price(stop)}",
+                reason="Низхідний режим: план SHORT лише після повернення в зону опору.",
+            )
+
+    reason = "Немає чистого плану для входу: " + regime.structure
+    return Signal(
+        **common,
+        direction="NO TRADE",
+        close_price=price,
+        entry_zone="",
+        stop=None,
+        targets=(),
+        risk_reward=None,
+        confidence="low",
+        invalidation="Чекати нового огляду ринку.",
+        reasons=(reason,),
+        pattern="brief_no_trade",
+    )
+
+
+def _brief_plan_signal(
+    common: dict[str, object],
+    *,
+    direction: str,
+    entry_low: float,
+    entry_high: float,
+    stop: float,
+    target: float,
+    pattern: str,
+    invalidation: str,
+    reason: str,
+) -> Signal:
+    entry = (entry_low + entry_high) / 2.0
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    return Signal(
+        **common,
+        direction=direction,
+        close_price=round(entry, 8),
+        entry_zone=_zone_text(entry_low, entry_high),
+        entry_low=round(entry_low, 8),
+        entry_high=round(entry_high, 8),
+        stop=round(stop, 8),
+        targets=(round(target, 8),),
+        risk_reward=round(reward / risk, 4) if risk > 0 else None,
+        confidence="medium",
+        invalidation=invalidation,
+        reasons=(reason,),
+        pattern=pattern,
+    )
 
 
 def _symbol_block(market: LiveMarketData) -> str:

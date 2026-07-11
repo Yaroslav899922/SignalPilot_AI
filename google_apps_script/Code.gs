@@ -29,6 +29,9 @@ const SIGNAL_COLUMNS = [
   "result_R",
   "baseline_R",
   "edge_R",
+  "entry_low",
+  "entry_high",
+  "activated_at",
 ];
 
 function doPost(e) {
@@ -134,6 +137,9 @@ function saveSignal_(signal) {
     "",
     "",
     "",
+    nullable_(signal.entry_low),
+    nullable_(signal.entry_high),
+    "",
   ]);
   return { ok: true, inserted: true, id: nextId };
 }
@@ -149,8 +155,11 @@ function loadEvaluableSignals_() {
       interval: row.interval,
       direction: row.direction,
       close_price: numberOrNull_(row.close_price),
+      entry_low: numberOrNull_(row.entry_low),
+      entry_high: numberOrNull_(row.entry_high),
       stop: numberOrNull_(row.stop),
       targets_json: row.targets_json || "[]",
+      source: row.source || "",
     }));
 }
 
@@ -158,6 +167,7 @@ function updateSignalEvaluation_(payload) {
   const sheet = getSignalsSheet_();
   const values = sheet.getDataRange().getValues();
   const idColumn = SIGNAL_COLUMNS.indexOf("id");
+  const activatedAtColumn = SIGNAL_COLUMNS.indexOf("activated_at");
   const evaluatedAtColumn = SIGNAL_COLUMNS.indexOf("evaluated_at");
   const outcomeColumn = SIGNAL_COLUMNS.indexOf("outcome");
   const maxFavorableColumn = SIGNAL_COLUMNS.indexOf("max_favorable_price");
@@ -169,6 +179,7 @@ function updateSignalEvaluation_(payload) {
   for (let index = 1; index < values.length; index += 1) {
     if (Number(values[index][idColumn]) === Number(payload.signal_id)) {
       const rowNumber = index + 1;
+      sheet.getRange(rowNumber, activatedAtColumn + 1).setValue(payload.activated_at || "");
       sheet.getRange(rowNumber, evaluatedAtColumn + 1).setValue(payload.evaluated_at || new Date().toISOString());
       sheet.getRange(rowNumber, outcomeColumn + 1).setValue(payload.outcome || "");
       sheet.getRange(rowNumber, maxFavorableColumn + 1).setValue(nullable_(payload.max_favorable_price));
@@ -195,6 +206,7 @@ function summarizeJournal_() {
     target_hit: targetHit,
     stop_hit: stopHit,
     no_result: rows.filter((row) => row.outcome === "no_result").length,
+    not_activated: rows.filter((row) => row.outcome === "not_activated").length,
     win_rate: resolved ? targetHit / resolved : null,
   };
 }
@@ -331,6 +343,7 @@ function reportMessage_(summary) {
     `<b>Target hit:</b> ${summary.target_hit || 0}`,
     `<b>Stop hit:</b> ${summary.stop_hit || 0}`,
     `<b>No result:</b> ${summary.no_result || 0}`,
+    `<b>Не активувалися:</b> ${summary.not_activated || 0}`,
     `<b>Win rate:</b> ${winRate}`,
     "",
     "Це paper-test статистика. SignalPilot не відкриває угоди.",

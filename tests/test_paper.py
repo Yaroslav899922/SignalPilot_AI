@@ -74,6 +74,47 @@ class PaperEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "not_enough_data")
 
+    def test_market_brief_plan_waits_for_entry_zone_before_evaluating(self):
+        result = evaluate_signal(
+            {
+                **_signal(direction="LONG", stop=95.0, target=110.0),
+                "close_price": 100.0,
+                "entry_low": 99.0,
+                "entry_high": 101.0,
+                "source": "market_brief",
+            },
+            pd.DataFrame(
+                {
+                    "open_time": pd.to_datetime(
+                        ["2026-05-31T01:00:00Z", "2026-05-31T02:00:00Z", "2026-05-31T03:00:00Z"],
+                        utc=True,
+                    ),
+                    "high": [105.0, 102.0, 111.0],
+                    "low": [103.0, 99.0, 104.0],
+                    "close": [104.0, 101.0, 110.0],
+                }
+            ),
+            lookahead_candles=3,
+        )
+
+        self.assertEqual(result.outcome, "target_hit")
+        self.assertEqual(result.activated_at, "2026-05-31T02:00:00+00:00")
+
+    def test_market_brief_plan_marks_unreached_entry_zone(self):
+        result = evaluate_signal(
+            {
+                **_signal(direction="SHORT", stop=105.0, target=90.0),
+                "entry_low": 99.0,
+                "entry_high": 101.0,
+                "source": "market_brief",
+            },
+            pd.DataFrame({"high": [110.0, 108.0], "low": [103.0, 102.0]}),
+            lookahead_candles=2,
+        )
+
+        self.assertEqual(result.outcome, "not_activated")
+        self.assertIsNone(result.activated_at)
+
 
 def _signal(direction: str, stop: float, target: float) -> dict[str, object]:
     return {

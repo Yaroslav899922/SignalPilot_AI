@@ -21,6 +21,7 @@ class EvaluationResult:
     result_R: float | None = None
     baseline_R: float | None = None
     edge_R: float | None = None
+    activated_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -36,7 +37,7 @@ def evaluate_journal(
         candles = fetcher(
             symbol=str(signal["symbol"]),
             interval=str(signal["interval"]),
-            limit=max(lookahead_candles + 20, 50),
+            limit=max(lookahead_candles + 72, 200),
         )
         result = evaluate_signal(signal, candles, lookahead_candles)
         update_signal_evaluation(
@@ -48,6 +49,7 @@ def evaluate_journal(
             result_R=result.result_R,
             baseline_R=result.baseline_R,
             edge_R=result.edge_R,
+            activated_at=result.activated_at,
         )
         results.append(result)
     return results
@@ -88,6 +90,9 @@ def evaluate_signal(
     target_price = float(targets[0])
     window = future_candles.head(lookahead_candles)
 
+    if _is_market_brief_plan(signal):
+        return _evaluate_market_brief_plan(signal, window, stop_price, target_price)
+
     if direction == "LONG":
         max_favorable = float(window["high"].max())
         max_adverse = float(window["low"].min())
@@ -110,6 +115,72 @@ def evaluate_signal(
         baseline_R=baseline_R,
         edge_R=edge_R,
     )
+
+
+def _is_market_brief_plan(signal: dict[str, object]) -> bool:
+    return (
+        str(signal.get("source", "")) == "market_brief"
+        and _float_or_none(signal.get("entry_low")) is not None
+        and _float_or_none(signal.get("entry_high")) is not None
+    )
+
+
+def _evaluate_market_brief_plan(
+    signal: dict[str, object],
+    window: pd.DataFrame,
+    stop: float,
+    target: float,
+) -> EvaluationResult:
+    symbol = str(signal["symbol"])
+    direction = str(signal["direction"])
+    entry_low = _float_or_none(signal.get("entry_low"))
+    entry_high = _float_or_none(signal.get("entry_high"))
+    assert entry_low is not None and entry_high is not None
+
+    activation_index = _entry_activation_index(window, entry_low, entry_high)
+    if activation_index is None:
+        return EvaluationResult(
+            signal_id=_signal_id(signal),
+            symbol=symbol,
+            direction=direction,
+            outcome="not_activated",
+            max_favorable_price=None,
+            max_adverse_price=None,
+        )
+
+    activated_window = window.iloc[activation_index:]
+    if direction == "LONG":
+        max_favorable = float(activated_window["high"].max())
+        max_adverse = float(activated_window["low"].min())
+    else:
+        max_favorable = float(activated_window["low"].min())
+        max_adverse = float(activated_window["high"].max())
+
+    outcome = _outcome(direction, stop, target, activated_window)
+    result_r = _result_r(signal, direction, stop, target, outcome, activated_window)
+    return EvaluationResult(
+        signal_id=_signal_id(signal),
+        symbol=symbol,
+        direction=direction,
+        outcome=outcome,
+        max_favorable_price=round(max_favorable, 2),
+        max_adverse_price=round(max_adverse, 2),
+        result_R=result_r,
+        activated_at=_candle_time(activated_window.iloc[0]),
+    )
+
+
+def _entry_activation_index(candles: pd.DataFrame, entry_low: float, entry_high: float) -> int | None:
+    for index, row in enumerate(candles.itertuples(index=False)):
+        if float(row.low) <= entry_high and float(row.high) >= entry_low:
+            return index
+    return None
+
+
+def _candle_time(row: pd.Series) -> str | None:
+    if "open_time" not in row.index:
+        return None
+    return pd.to_datetime(row["open_time"], utc=True).isoformat()
 
 
 def _future_candles(candles: pd.DataFrame, created_at: str, lookahead_candles: int) -> pd.DataFrame:

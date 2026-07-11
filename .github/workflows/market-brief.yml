@@ -40,6 +40,9 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SIGNALPILOT_JOURNAL_BACKEND: apps_script
+      SIGNALPILOT_JOURNAL_API_URL: ${{ secrets.SIGNALPILOT_JOURNAL_API_URL }}
+      SIGNALPILOT_JOURNAL_API_TOKEN: ${{ secrets.SIGNALPILOT_JOURNAL_API_TOKEN }}
       EVENT_NAME: ${{ github.event_name }}
       EVENT_SCHEDULE: ${{ github.event.schedule }}
       DISPATCH_MODE: ${{ inputs.mode }}
@@ -130,6 +133,10 @@ jobs:
 
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "brief_session=$brief_session" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate market plans from 48 hours ago
+        if: steps.run_mode.outputs.mode == 'brief'
+        run: python -m signalpilot --evaluate --lookahead-candles 48
 
       - name: Send market brief
         if: steps.run_mode.outputs.mode == 'brief'

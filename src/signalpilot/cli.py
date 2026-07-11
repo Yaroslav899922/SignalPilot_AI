@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .binance import DEFAULT_KLINE_LIMIT
-from .brief import generate_brief
+from .brief import build_brief_journal_signals, generate_brief
 from .journal_backend import save_signal, summarize_journal
 from .live_analyst import analyze_live_market, format_market_status
 from .market_data import load_live_market_data
@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_telegram_bot(args, journal_path, telegram_config)
 
     if args.brief:
-        _run_brief(args, telegram_config)
+        _run_brief(args, journal_path, telegram_config)
         return 0
 
     if args.move_alert:
@@ -108,16 +108,30 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _run_brief(args: argparse.Namespace, telegram_config: TelegramConfig | None) -> None:
+def _run_brief(
+    args: argparse.Namespace,
+    journal_path: Path,
+    telegram_config: TelegramConfig | None,
+) -> None:
     markets = [
         load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
         for symbol in args.symbols
     ]
-    text = generate_brief(markets, session_label=args.brief_session)
+    now = datetime.now(timezone.utc)
+    text = generate_brief(markets, now_utc=now, session_label=args.brief_session)
+    journal_signals = build_brief_journal_signals(markets, now_utc=now)
+    saved = 0
+    skipped = 0
+    for signal in journal_signals:
+        if save_signal(signal, journal_path):
+            saved += 1
+        else:
+            skipped += 1
     print("===SIGNALPILOT-BRIEF-START===")
     print(text)
     print("===SIGNALPILOT-BRIEF-END===")
     print(json.dumps({"brief": "generated", "symbols": list(args.symbols)}, ensure_ascii=False))
+    print(json.dumps({"brief_journal": "saved", "records": saved, "skipped": skipped}, ensure_ascii=False))
     if telegram_config is not None:
         from .telegram import send_message
         send_message(text, telegram_config)

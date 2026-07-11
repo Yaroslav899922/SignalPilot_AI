@@ -31,10 +31,11 @@ class CliTests(unittest.TestCase):
                 "short": 0,
                 "no_trade": 0,
                 "pending": 0,
-                "target_hit": 0,
-                "stop_hit": 0,
-                "no_result": 0,
-                "win_rate": None,
+                    "target_hit": 0,
+                    "stop_hit": 0,
+                    "no_result": 0,
+                    "not_activated": 0,
+                    "win_rate": None,
             },
         )
 
@@ -157,19 +158,22 @@ class CliTests(unittest.TestCase):
         ):
             with patch("signalpilot.cli.load_live_market_data", side_effect=fake_market) as fetch_market:
                 with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
-                    with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send_message:
-                        with redirect_stdout(output):
-                            exit_code = main(["--brief", "--notify", "--symbols", "BTCUSDT", "ETHUSDT"])
+                    with patch("signalpilot.cli.build_brief_journal_signals", return_value=[]):
+                        with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send_message:
+                            with redirect_stdout(output):
+                                exit_code = main(["--brief", "--notify", "--symbols", "BTCUSDT", "ETHUSDT"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual([call.kwargs["symbol"] for call in fetch_market.call_args_list], ["BTCUSDT", "ETHUSDT"])
-        generate_brief.assert_called_once_with(
+        self.assertEqual(
+            generate_brief.call_args.args[0],
             [
                 {"symbol": "BTCUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
                 {"symbol": "ETHUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
             ],
-            session_label=None,
         )
+        self.assertIsNotNone(generate_brief.call_args.kwargs["now_utc"])
+        self.assertIsNone(generate_brief.call_args.kwargs["session_label"])
         send_message.assert_called_once()
         self.assertEqual(send_message.call_args.args[0], "<b>brief</b>")
         self.assertEqual(send_message.call_args.args[1].bot_token, "token")
@@ -179,15 +183,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("<b>brief</b>", out)
         self.assertIn("===SIGNALPILOT-BRIEF-END===", out)
         status_lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
-        self.assertEqual(status_lines, [{"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]}, {"brief": "sent"}])
+        self.assertEqual(
+            status_lines,
+            [
+                {"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]},
+                {"brief_journal": "saved", "records": 0, "skipped": 0},
+                {"brief": "sent"},
+            ],
+        )
 
     def test_brief_passes_session_label(self):
         output = io.StringIO()
 
         with patch("signalpilot.cli.load_live_market_data", return_value={"symbol": "BTCUSDT"}):
             with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
-                with redirect_stdout(output):
-                    exit_code = main(["--brief", "--brief-session", "Лондон · open +1h", "--symbols", "BTCUSDT"])
+                with patch("signalpilot.cli.build_brief_journal_signals", return_value=[]):
+                    with redirect_stdout(output):
+                        exit_code = main(["--brief", "--brief-session", "Лондон · open +1h", "--symbols", "BTCUSDT"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(generate_brief.call_args.kwargs["session_label"], "Лондон · open +1h")
@@ -196,7 +208,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("<b>brief</b>", out)
         self.assertIn("===SIGNALPILOT-BRIEF-END===", out)
         status_lines = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
-        self.assertEqual(status_lines, [{"brief": "generated", "symbols": ["BTCUSDT"]}])
+        self.assertEqual(
+            status_lines,
+            [
+                {"brief": "generated", "symbols": ["BTCUSDT"]},
+                {"brief_journal": "saved", "records": 0, "skipped": 0},
+            ],
+        )
 
     def test_move_alert_with_notify_sends_triggered_alerts(self):
         output = io.StringIO()
