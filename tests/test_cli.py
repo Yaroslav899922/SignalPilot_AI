@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from signalpilot.cli import main
@@ -36,6 +37,16 @@ class CliTests(unittest.TestCase):
                     "no_result": 0,
                     "not_activated": 0,
                     "win_rate": None,
+                    "confirmed_entries": 0,
+                    "confirmed_pending": 0,
+                    "confirmed_target_hit": 0,
+                    "confirmed_stop_hit": 0,
+                    "confirmed_no_result": 0,
+                    "confirmed_win_rate": None,
+                    "confirmed_result_R": None,
+                    "confirmed_baseline_R": None,
+                    "confirmed_edge_R": None,
+                    "legacy_market_brief_rows": 0,
             },
         )
 
@@ -157,8 +168,8 @@ class CliTests(unittest.TestCase):
             clear=True,
         ):
             with patch("signalpilot.cli.load_live_market_data", side_effect=fake_market) as fetch_market:
-                with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
-                    with patch("signalpilot.cli.build_brief_journal_signals", return_value=[]):
+                with patch("signalpilot.cli.analyze_actionable_setup", return_value=None):
+                    with patch("signalpilot.cli.format_action_brief", return_value="<b>brief</b>") as format_brief:
                         with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send_message:
                             with redirect_stdout(output):
                                 exit_code = main(["--brief", "--notify", "--symbols", "BTCUSDT", "ETHUSDT"])
@@ -166,14 +177,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual([call.kwargs["symbol"] for call in fetch_market.call_args_list], ["BTCUSDT", "ETHUSDT"])
         self.assertEqual(
-            generate_brief.call_args.args[0],
+            format_brief.call_args.args[0],
             [
                 {"symbol": "BTCUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
                 {"symbol": "ETHUSDT", "intervals": ("15m", "1h", "4h"), "limit": 500},
             ],
         )
-        self.assertIsNotNone(generate_brief.call_args.kwargs["now_utc"])
-        self.assertIsNone(generate_brief.call_args.kwargs["session_label"])
+        self.assertEqual(format_brief.call_args.args[1], [])
+        self.assertIsNotNone(format_brief.call_args.kwargs["now_utc"])
+        self.assertIsNone(format_brief.call_args.kwargs["session_label"])
         send_message.assert_called_once()
         self.assertEqual(send_message.call_args.args[0], "<b>brief</b>")
         self.assertEqual(send_message.call_args.args[1].bot_token, "token")
@@ -187,7 +199,6 @@ class CliTests(unittest.TestCase):
             status_lines,
             [
                 {"brief": "generated", "symbols": ["BTCUSDT", "ETHUSDT"]},
-                {"brief_journal": "saved", "records": 0, "skipped": 0},
                 {"brief": "sent"},
             ],
         )
@@ -196,13 +207,13 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
 
         with patch("signalpilot.cli.load_live_market_data", return_value={"symbol": "BTCUSDT"}):
-            with patch("signalpilot.cli.generate_brief", return_value="<b>brief</b>") as generate_brief:
-                with patch("signalpilot.cli.build_brief_journal_signals", return_value=[]):
+            with patch("signalpilot.cli.analyze_actionable_setup", return_value=None):
+                with patch("signalpilot.cli.format_action_brief", return_value="<b>brief</b>") as format_brief:
                     with redirect_stdout(output):
                         exit_code = main(["--brief", "--brief-session", "Лондон · open +1h", "--symbols", "BTCUSDT"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(generate_brief.call_args.kwargs["session_label"], "Лондон · open +1h")
+        self.assertEqual(format_brief.call_args.kwargs["session_label"], "Лондон · open +1h")
         out = output.getvalue()
         self.assertIn("===SIGNALPILOT-BRIEF-START===", out)
         self.assertIn("<b>brief</b>", out)
@@ -212,8 +223,46 @@ class CliTests(unittest.TestCase):
             status_lines,
             [
                 {"brief": "generated", "symbols": ["BTCUSDT"]},
-                {"brief_journal": "saved", "records": 0, "skipped": 0},
             ],
+        )
+
+    def test_setup_check_sends_only_persisted_state_changes(self):
+        output = io.StringIO()
+        market = {"symbol": "BTCUSDT"}
+        event = SimpleNamespace(status="TRIGGERED")
+        signal = SimpleNamespace(symbol="BTCUSDT")
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "channel"},
+            clear=True,
+        ):
+            with patch("signalpilot.cli.load_live_market_data", return_value=market):
+                with patch("signalpilot.cli.load_latest_setups", return_value=[]):
+                    with patch("signalpilot.cli.analyze_actionable_setup", return_value=event):
+                        with patch("signalpilot.cli.reconcile_setup_state", return_value=[event]):
+                            with patch("signalpilot.cli.save_setup_event", return_value=True):
+                                with patch("signalpilot.cli.setup_to_signal", return_value=signal):
+                                    with patch("signalpilot.cli.save_signal", return_value=True):
+                                        with patch("signalpilot.cli.format_setup_message", return_value="<b>entry</b>"):
+                                            with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send:
+                                                with redirect_stdout(output):
+                                                    exit_code = main(
+                                                        ["--setup-check", "--notify", "--symbols", "BTCUSDT"]
+                                                    )
+
+        self.assertEqual(exit_code, 0)
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[0], "<b>entry</b>")
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {
+                "setup_check": "completed",
+                "symbols": ["BTCUSDT"],
+                "state_changes": 1,
+                "paper_entries": 1,
+                "messages_sent": 1,
+            },
         )
 
     def test_move_alert_with_notify_sends_triggered_alerts(self):

@@ -6,6 +6,24 @@ from signalpilot.paper import evaluate_signal
 
 
 class PaperEvaluationTests(unittest.TestCase):
+    def test_candle_opening_at_confirmation_time_is_evaluated(self):
+        signal = _signal(direction="LONG", stop=95.0, target=110.0)
+        candles = pd.DataFrame(
+            {
+                "open_time": pd.to_datetime(
+                    ["2026-05-31T00:00:00Z", "2026-05-31T01:00:00Z"], utc=True
+                ),
+                "open": [100.0, 100.0],
+                "high": [111.0, 101.0],
+                "low": [99.0, 99.0],
+                "close": [110.0, 100.0],
+            }
+        )
+
+        result = evaluate_signal(signal, candles, lookahead_candles=1)
+
+        self.assertEqual(result.outcome, "target_hit")
+
     def test_long_target_hit(self):
         result = evaluate_signal(
             _signal(direction="LONG", stop=95.0, target=110.0),
@@ -114,6 +132,29 @@ class PaperEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "not_activated")
         self.assertIsNone(result.activated_at)
+
+    def test_actionable_entry_includes_fees_and_small_slippage(self):
+        result = evaluate_signal(
+            {
+                **_signal(direction="LONG", stop=95.0, target=110.0),
+                "close_price": 100.0,
+                "source": "actionable_alert",
+            },
+            pd.DataFrame(
+                {
+                    "open": [100.0, 105.0],
+                    "high": [106.0, 111.0],
+                    "low": [99.0, 103.0],
+                    "close": [105.0, 110.0],
+                }
+            ),
+            lookahead_candles=2,
+        )
+
+        self.assertEqual(result.outcome, "target_hit")
+        self.assertEqual(result.result_R, 1.976)
+        self.assertIsNotNone(result.baseline_R)
+        self.assertIsNotNone(result.edge_R)
 
 
 def _signal(direction: str, stop: float, target: float) -> dict[str, object]:

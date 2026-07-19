@@ -10,6 +10,9 @@ from .journal_backend import load_evaluable_signals, update_signal_evaluation
 from .signals import Signal
 
 
+ACTIONABLE_ROUND_TRIP_COST_RATE = 0.0012
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     signal_id: int | None
@@ -189,7 +192,7 @@ def _future_candles(candles: pd.DataFrame, created_at: str, lookahead_candles: i
 
     created = pd.to_datetime(created_at, utc=True)
     open_times = pd.to_datetime(candles["open_time"], utc=True)
-    return candles.loc[open_times > created].head(lookahead_candles)
+    return candles.loc[open_times >= created].head(lookahead_candles)
 
 
 def _outcome(direction: str, stop: float, target: float, candles: pd.DataFrame) -> str:
@@ -220,7 +223,8 @@ def _result_r(
     entry = _float_or_none(signal.get("close_price"))
     if entry is None:
         return None
-    return _r_for_entry(direction, entry, stop, target, outcome, candles)
+    raw = _r_for_entry(direction, entry, stop, target, outcome, candles)
+    return _apply_actionable_cost(signal, raw, entry, stop)
 
 
 def _baseline_r(
@@ -244,7 +248,8 @@ def _baseline_r(
     baseline_stop = entry - sign * risk
     baseline_target = entry + sign * reward
     outcome = _outcome(direction, baseline_stop, baseline_target, candles)
-    return _r_for_entry(direction, entry, baseline_stop, baseline_target, outcome, candles)
+    raw = _r_for_entry(direction, entry, baseline_stop, baseline_target, outcome, candles)
+    return _apply_actionable_cost(signal, raw, entry, baseline_stop)
 
 
 def _r_for_entry(
@@ -275,6 +280,21 @@ def _edge_r(result_R: float | None, baseline_R: float | None) -> float | None:
     if result_R is None or baseline_R is None:
         return None
     return round(result_R - baseline_R, 4)
+
+
+def _apply_actionable_cost(
+    signal: dict[str, object],
+    result_r: float | None,
+    entry: float,
+    stop: float,
+) -> float | None:
+    if result_r is None or str(signal.get("source", "")) != "actionable_alert":
+        return result_r
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return result_r
+    cost_r = entry * ACTIONABLE_ROUND_TRIP_COST_RATE / risk
+    return round(result_r - cost_r, 4)
 
 
 def _first_open_or_close(candles: pd.DataFrame) -> float | None:

@@ -1,4 +1,5 @@
 const SIGNALS_SHEET_NAME = "signals";
+const SETUPS_SHEET_NAME = "setup_events";
 const SIGNAL_COLUMNS = [
   "id",
   "created_at",
@@ -32,6 +33,33 @@ const SIGNAL_COLUMNS = [
   "entry_low",
   "entry_high",
   "activated_at",
+  "setup_id",
+  "setup_status",
+  "expires_at",
+];
+const SETUP_COLUMNS = [
+  "setup_id",
+  "symbol",
+  "pattern",
+  "direction",
+  "status",
+  "regime",
+  "current_price",
+  "trigger_level",
+  "entry_low",
+  "entry_high",
+  "stop",
+  "targets_json",
+  "risk_reward",
+  "score",
+  "action",
+  "reason",
+  "invalidation",
+  "conditions_json",
+  "created_at",
+  "expires_at",
+  "source",
+  "fingerprint",
 ];
 
 function doPost(e) {
@@ -62,6 +90,12 @@ function handleJournalApi_(payload) {
   }
   if (payload.action === "summarize_journal") {
     return jsonResponse_({ ok: true, summary: summarizeJournal_() });
+  }
+  if (payload.action === "save_setup_event") {
+    return jsonResponse_(saveSetupEvent_(payload.setup, payload.fingerprint));
+  }
+  if (payload.action === "load_latest_setups") {
+    return jsonResponse_({ ok: true, setups: loadLatestSetups_() });
   }
   return jsonResponse_({ ok: false, error: "unknown action" });
 }
@@ -140,6 +174,9 @@ function saveSignal_(signal) {
     nullable_(signal.entry_low),
     nullable_(signal.entry_high),
     "",
+    signal.setup_id || "",
+    signal.setup_status || "",
+    signal.expires_at || "",
   ]);
   return { ok: true, inserted: true, id: nextId };
 }
@@ -197,6 +234,10 @@ function summarizeJournal_() {
   const targetHit = rows.filter((row) => row.outcome === "target_hit").length;
   const stopHit = rows.filter((row) => row.outcome === "stop_hit").length;
   const resolved = targetHit + stopHit;
+  const confirmedRows = rows.filter((row) => row.source === "actionable_alert");
+  const confirmedTarget = confirmedRows.filter((row) => row.outcome === "target_hit").length;
+  const confirmedStop = confirmedRows.filter((row) => row.outcome === "stop_hit").length;
+  const confirmedResolved = confirmedTarget + confirmedStop;
   return {
     signals: rows.length,
     long: rows.filter((row) => row.direction === "LONG").length,
@@ -208,6 +249,16 @@ function summarizeJournal_() {
     no_result: rows.filter((row) => row.outcome === "no_result").length,
     not_activated: rows.filter((row) => row.outcome === "not_activated").length,
     win_rate: resolved ? targetHit / resolved : null,
+    confirmed_entries: confirmedRows.length,
+    confirmed_pending: confirmedRows.filter((row) => !row.outcome || row.outcome === "not_enough_data").length,
+    confirmed_target_hit: confirmedTarget,
+    confirmed_stop_hit: confirmedStop,
+    confirmed_no_result: confirmedRows.filter((row) => row.outcome === "no_result").length,
+    confirmed_win_rate: confirmedResolved ? confirmedTarget / confirmedResolved : null,
+    confirmed_result_R: sumOptional_(confirmedRows, "result_R"),
+    confirmed_baseline_R: sumOptional_(confirmedRows, "baseline_R"),
+    confirmed_edge_R: sumOptional_(confirmedRows, "edge_R"),
+    legacy_market_brief_rows: rows.filter((row) => row.source === "market_brief").length,
   };
 }
 
@@ -232,10 +283,10 @@ function parseCommand_(text) {
 }
 
 function dispatchMarketCheck_(chatId) {
-  dispatchSignalPilotWorkflow_(chatId, "", "");
+  dispatchSignalPilotWorkflow_(chatId, "", "", "brief");
 }
 
-function dispatchSignalPilotWorkflow_(chatId, symbols, tradingViewPayload) {
+function dispatchSignalPilotWorkflow_(chatId, symbols, tradingViewPayload, mode) {
   const owner = getProperty_("GITHUB_OWNER");
   const repo = getProperty_("GITHUB_REPO");
   const workflow = getProperty_("GITHUB_WORKFLOW_FILE");
@@ -252,9 +303,8 @@ function dispatchSignalPilotWorkflow_(chatId, symbols, tradingViewPayload) {
     payload: JSON.stringify({
       ref: "main",
       inputs: {
-        chat_id: String(chatId),
-        symbols: String(symbols || ""),
-        tradingview_payload: String(tradingViewPayload || ""),
+        mode: mode || "brief",
+        brief_session_key: "market",
       },
     }),
     muteHttpExceptions: true,
@@ -275,7 +325,7 @@ function handleTradingViewWebhook_(payload) {
       `<b>TradingView trigger отримано:</b> ${symbol || "невідомий символ"}\nSignalPilot перевірить Binance-дані перед алертом.`
     );
   }
-  dispatchSignalPilotWorkflow_(chatId, symbol, JSON.stringify(redactTradingViewPayload_(payload)));
+  dispatchSignalPilotWorkflow_(chatId, symbol, JSON.stringify(redactTradingViewPayload_(payload)), "setup-check");
   return jsonResponse_({ ok: true, dispatched: true, symbol: symbol });
 }
 
@@ -330,23 +380,26 @@ function statusMessage_() {
 }
 
 function reportMessage_(summary) {
-  const winRate = summary.win_rate === null || summary.win_rate === undefined ? "-" : `${(summary.win_rate * 100).toFixed(1)}%`;
+  const winRate = summary.confirmed_win_rate === null || summary.confirmed_win_rate === undefined
+    ? "ще немає завершених входів"
+    : `${(summary.confirmed_win_rate * 100).toFixed(1)}%`;
   return [
     "<b>Звіт SignalPilot</b>",
     "",
-    `<b>Всього записів:</b> ${summary.signals || 0}`,
-    `<b>LONG:</b> ${summary.long || 0}`,
-    `<b>SHORT:</b> ${summary.short || 0}`,
-    `<b>НЕ ВХОДИТИ:</b> ${summary.no_trade || 0}`,
-    `<b>Очікують оцінки:</b> ${summary.pending || 0}`,
+    "<b>Тільки підтверджені входи</b>",
+    `<b>Входів:</b> ${summary.confirmed_entries || 0}`,
+    `<b>Ціль спрацювала:</b> ${summary.confirmed_target_hit || 0}`,
+    `<b>Захисний вихід:</b> ${summary.confirmed_stop_hit || 0}`,
+    `<b>Ще перевіряються:</b> ${summary.confirmed_pending || 0}`,
+    `<b>Без чіткого результату:</b> ${summary.confirmed_no_result || 0}`,
+    `<b>Успішність завершених:</b> ${winRate}`,
     "",
-    `<b>Target hit:</b> ${summary.target_hit || 0}`,
-    `<b>Stop hit:</b> ${summary.stop_hit || 0}`,
-    `<b>No result:</b> ${summary.no_result || 0}`,
-    `<b>Не активувалися:</b> ${summary.not_activated || 0}`,
-    `<b>Win rate:</b> ${winRate}`,
+    `<b>Результат входів:</b> ${formatR_(summary.confirmed_result_R)}`,
+    `<b>Якби просто тримали:</b> ${formatR_(summary.confirmed_baseline_R)}`,
+    `<b>Перевага сигналів:</b> ${formatR_(summary.confirmed_edge_R)}`,
     "",
-    "Це paper-test статистика. SignalPilot не відкриває угоди.",
+    `<b>Старі оглядові плани (не входи):</b> ${summary.legacy_market_brief_rows || 0}`,
+    "Це навчальна перевірка без реальних угод.",
   ].join("\n");
 }
 
@@ -366,14 +419,107 @@ function getSignalsSheet_() {
   return sheet;
 }
 
+function getSetupsSheet_() {
+  const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
+  const spreadsheet = spreadsheetId ? SpreadsheetApp.openById(spreadsheetId) : SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(SETUPS_SHEET_NAME);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(SETUPS_SHEET_NAME);
+  }
+  const headers = sheet.getRange(1, 1, 1, SETUP_COLUMNS.length).getValues()[0];
+  if (headers.join("") === "") {
+    sheet.getRange(1, 1, 1, SETUP_COLUMNS.length).setValues([SETUP_COLUMNS]);
+  } else {
+    ensureColumns_(sheet, headers, SETUP_COLUMNS);
+  }
+  return sheet;
+}
+
 function ensureSignalColumns_(sheet, headers) {
+  ensureColumns_(sheet, headers, SIGNAL_COLUMNS);
+}
+
+function ensureColumns_(sheet, headers, expectedColumns) {
   const existing = headers.map((value) => String(value)).filter((value) => value);
-  const missing = SIGNAL_COLUMNS.filter((column) => !existing.includes(column));
+  const missing = expectedColumns.filter((column) => !existing.includes(column));
   if (!missing.length) {
     return;
   }
   const startColumn = existing.length + 1;
   sheet.getRange(1, startColumn, 1, missing.length).setValues([missing]);
+}
+
+function saveSetupEvent_(setup, fingerprint) {
+  const sheet = getSetupsSheet_();
+  const rows = readRows_(sheet);
+  const sameSetupRows = rows.filter(
+    (row) => String(row.setup_id) === String(setup.setup_id || "")
+  );
+  const latest = sameSetupRows.length ? sameSetupRows[sameSetupRows.length - 1] : null;
+  const exists = latest &&
+    String(latest.status) === String(setup.status || "") &&
+    String(latest.fingerprint) === String(fingerprint || "");
+  if (exists) {
+    return { ok: true, inserted: false };
+  }
+  sheet.appendRow([
+    setup.setup_id || "",
+    setup.symbol || "",
+    setup.pattern || "",
+    setup.direction || "",
+    setup.status || "",
+    setup.regime || "",
+    nullable_(setup.current_price),
+    nullable_(setup.trigger_level),
+    nullable_(setup.entry_low),
+    nullable_(setup.entry_high),
+    nullable_(setup.stop),
+    JSON.stringify(setup.targets || []),
+    nullable_(setup.risk_reward),
+    nullable_(setup.score),
+    setup.action || "",
+    setup.reason || "",
+    setup.invalidation || "",
+    JSON.stringify(setup.conditions || []),
+    setup.created_at || new Date().toISOString(),
+    setup.expires_at || "",
+    setup.source || "actionable_setup",
+    fingerprint || "",
+  ]);
+  return { ok: true, inserted: true };
+}
+
+function loadLatestSetups_() {
+  const latest = {};
+  readRows_(getSetupsSheet_()).forEach((row) => {
+    latest[String(row.setup_id)] = row;
+  });
+  return Object.keys(latest).map((setupId) => {
+    const row = latest[setupId];
+    return {
+      setup_id: row.setup_id || "",
+      symbol: row.symbol || "",
+      pattern: row.pattern || "",
+      direction: row.direction || "",
+      status: row.status || "",
+      regime: row.regime || "",
+      current_price: numberOrNull_(row.current_price),
+      trigger_level: numberOrNull_(row.trigger_level),
+      entry_low: numberOrNull_(row.entry_low),
+      entry_high: numberOrNull_(row.entry_high),
+      stop: numberOrNull_(row.stop),
+      targets: JSON.parse(row.targets_json || "[]"),
+      risk_reward: numberOrNull_(row.risk_reward),
+      score: numberOrNull_(row.score),
+      action: row.action || "",
+      reason: row.reason || "",
+      invalidation: row.invalidation || "",
+      conditions: JSON.parse(row.conditions_json || "[]"),
+      created_at: row.created_at || "",
+      expires_at: row.expires_at || "",
+      source: row.source || "actionable_setup",
+    };
+  });
 }
 
 function readRows_(sheet) {
@@ -392,8 +538,12 @@ function readRows_(sheet) {
 }
 
 function signalExists_(rows, signal, targetsJson) {
+  if (signal.setup_id) {
+    return rows.some((row) => String(row.setup_id || "") === String(signal.setup_id));
+  }
   return rows.some((row) =>
     row.symbol === signal.symbol &&
+    ((signal.source || "") !== "market_brief" || String(row.created_at) === String(signal.created_at || "")) &&
     row.interval === signal.interval &&
     row.direction === signal.direction &&
     String(row.close_price) === String(nullable_(signal.close_price)) &&
@@ -449,6 +599,27 @@ function numberOrNull_(value) {
     return null;
   }
   return Number(value);
+}
+
+function sumOptional_(rows, column) {
+  const values = rows
+    .map((row) => row[column])
+    .filter((value) => value !== "" && value !== null && value !== undefined)
+    .map((value) => Number(value))
+    .filter((value) => !Number.isNaN(value));
+  if (!values.length) {
+    return null;
+  }
+  return Math.round(values.reduce((total, value) => total + value, 0) * 10000) / 10000;
+}
+
+function formatR_(value) {
+  if (value === null || value === undefined || value === "") {
+    return "ще немає даних";
+  }
+  const number = Number(value);
+  const sign = number > 0 ? "+" : "";
+  return `${sign}${number.toFixed(2)}R`;
 }
 
 function jsonResponse_(payload) {

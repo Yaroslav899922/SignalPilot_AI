@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - brief
+          - setup-check
           - move-alert
       brief_session_key:
         description: "Brief session label"
@@ -27,12 +28,9 @@ on:
           - new-york-close
   schedule:
     - cron: '7 0 * * *'   # 03:07 Київ · Азія · open +1h
-    - cron: '7 8 * * *'   # 11:07 Київ · Азія · close -1h
     - cron: '7 9 * * *'   # 12:07 Київ · Лондон · open +1h
-    - cron: '7 16 * * *'  # 19:07 Київ · Лондон · close -1h
     - cron: '7 14 * * *'  # 17:07 Київ · Нью-Йорк · open +1h
-    - cron: '7 21 * * *'  # 00:07 Київ · Нью-Йорк · close -1h
-    - cron: '5,20,35,50 0-21,23 * * *'  # Move alerts during session windows, Kyiv summer time
+    - cron: '5,20,35,50 0-21,23 * * *'  # Quiet setup checks; Telegram only on a state change
 
 jobs:
   market-brief:
@@ -102,28 +100,16 @@ jobs:
                 mode="brief"
                 brief_session="Азія · open +1h"
                 ;;
-              "7 8 * * *")
-                mode="brief"
-                brief_session="Азія · close -1h"
-                ;;
               "7 9 * * *")
                 mode="brief"
                 brief_session="Лондон · open +1h"
-                ;;
-              "7 16 * * *")
-                mode="brief"
-                brief_session="Лондон · close -1h"
                 ;;
               "7 14 * * *")
                 mode="brief"
                 brief_session="Нью-Йорк · open +1h"
                 ;;
-              "7 21 * * *")
-                mode="brief"
-                brief_session="Нью-Йорк · close -1h"
-                ;;
               "5,20,35,50 0-21,23 * * *")
-                mode="move-alert"
+                mode="setup-check"
                 ;;
               *)
                 mode="brief"
@@ -141,6 +127,10 @@ jobs:
       - name: Send market brief
         if: steps.run_mode.outputs.mode == 'brief'
         run: python -m signalpilot --brief --notify --brief-session "${{ steps.run_mode.outputs.brief_session }}" --symbols BTCUSDT ETHUSDT SOLUSDT
+
+      - name: Track actionable setups
+        if: steps.run_mode.outputs.mode == 'setup-check'
+        run: python -m signalpilot --setup-check --notify --symbols BTCUSDT ETHUSDT SOLUSDT
 
       - name: Send move alert
         if: steps.run_mode.outputs.mode == 'move-alert'

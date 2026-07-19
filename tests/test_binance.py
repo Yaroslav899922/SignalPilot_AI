@@ -8,6 +8,7 @@ import pandas as pd
 from signalpilot.binance import (
     _closed_candles,
     _get_json,
+    fetch_klines,
     fetch_funding_rate,
     fetch_long_short_ratio,
     fetch_open_interest,
@@ -30,6 +31,26 @@ class FakeResponse:
 
 
 class BinanceTests(unittest.TestCase):
+    def test_fetch_klines_can_replay_a_historical_cutoff(self):
+        raw = [
+            [
+                1784390400000,
+                "100",
+                "105",
+                "99",
+                "104",
+                "10",
+                1784393999999,
+            ]
+        ]
+        cutoff = pd.Timestamp("2026-07-18T18:00:00Z")
+        with patch("signalpilot.binance._get_json", return_value=raw) as get_json:
+            candles = fetch_klines("BTCUSDT", interval="1h", limit=1, end_time=cutoff)
+
+        params = get_json.call_args.args[1]
+        self.assertEqual(params["endTime"], int(cutoff.timestamp() * 1000))
+        self.assertEqual(candles["close"].tolist(), [104.0])
+
     def test_closed_candles_drop_unfinished_candle(self):
         candles = pd.DataFrame(
             {

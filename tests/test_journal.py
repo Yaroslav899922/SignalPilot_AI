@@ -194,6 +194,43 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(summary["not_activated"], 1)
         self.assertEqual(summary["win_rate"], 0.5)
 
+    def test_summary_separates_confirmed_entries_from_legacy_plans(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            legacy = replace(
+                _signal(direction="LONG", created_at="2026-07-18T10:00:00+00:00"),
+                source="market_brief",
+            )
+            confirmed = replace(
+                _signal(direction="LONG", created_at="2026-07-19T10:00:00+00:00"),
+                source="actionable_alert",
+                setup_id="BTCUSDT-breakout-retest-1",
+                setup_status="TRIGGERED",
+            )
+            save_signal(legacy, db_path)
+            save_signal(confirmed, db_path)
+            update_signal_evaluation(
+                db_path,
+                signal_id=2,
+                outcome="target_hit",
+                max_favorable_price=110.0,
+                max_adverse_price=99.0,
+                result_R=1.38,
+                baseline_R=0.42,
+                edge_R=0.96,
+            )
+
+            summary = summarize_journal(db_path)
+
+        self.assertEqual(summary["signals"], 2)
+        self.assertEqual(summary["confirmed_entries"], 1)
+        self.assertEqual(summary["confirmed_target_hit"], 1)
+        self.assertEqual(summary["confirmed_win_rate"], 1.0)
+        self.assertEqual(summary["confirmed_result_R"], 1.38)
+        self.assertEqual(summary["confirmed_baseline_R"], 0.42)
+        self.assertEqual(summary["confirmed_edge_R"], 0.96)
+        self.assertEqual(summary["legacy_market_brief_rows"], 1)
+
 
 def _signal(direction: str, created_at: str) -> Signal:
     is_directional = direction in {"LONG", "SHORT"}

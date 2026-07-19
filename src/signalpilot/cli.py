@@ -8,12 +8,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .binance import DEFAULT_KLINE_LIMIT
-from .brief import build_brief_journal_signals, generate_brief
+from .actionable import (
+    TRIGGERED,
+    analyze_actionable_setup,
+    format_action_brief,
+    format_setup_message,
+    reconcile_setup_state,
+    should_notify_setup_event,
+    setup_to_signal,
+)
 from .journal_backend import save_signal, summarize_journal
 from .live_analyst import analyze_live_market, format_market_status
 from .market_data import load_live_market_data
 from .paper import evaluate_journal
 from .signals import DEFAULT_TIMEFRAMES, Signal
+from .setup_backend import load_latest_setups, save_setup_event
 from .telegram import TELEGRAM_API_BASE_URL, TelegramConfig, send_signal
 from .telegram_bot import run_telegram_bot
 from .tradingview import TradingViewTrigger, parse_tradingview_trigger
@@ -47,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--brief-session", help="Session label to print in a scheduled market brief.")
     parser.add_argument("--move-alert", action="store_true", help="Send alerts for sharp 15m market moves.")
     parser.add_argument("--move-threshold-pct", type=float, default=1.5)
+    parser.add_argument(
+        "--setup-check",
+        action="store_true",
+        help="Quietly track actionable setups and notify only on a state change.",
+    )
     args = parser.parse_args(argv)
 
     journal_path = Path(args.journal)
@@ -89,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         _run_brief(args, journal_path, telegram_config)
         return 0
 
+    if args.setup_check:
+        _run_setup_check(args, journal_path, telegram_config)
+        return 0
+
     if args.move_alert:
         _run_move_alert(args, telegram_config)
         return 0
@@ -118,24 +136,71 @@ def _run_brief(
         for symbol in args.symbols
     ]
     now = datetime.now(timezone.utc)
-    text = generate_brief(markets, now_utc=now, session_label=args.brief_session)
-    journal_signals = build_brief_journal_signals(markets, now_utc=now)
-    saved = 0
-    skipped = 0
-    for signal in journal_signals:
-        if save_signal(signal, journal_path):
-            saved += 1
-        else:
-            skipped += 1
+    setups = [
+        setup
+        for market in markets
+        if (setup := analyze_actionable_setup(market, now_utc=now)) is not None
+    ]
+    text = format_action_brief(
+        markets,
+        setups,
+        now_utc=now,
+        session_label=args.brief_session,
+    )
     print("===SIGNALPILOT-BRIEF-START===")
     print(text)
     print("===SIGNALPILOT-BRIEF-END===")
     print(json.dumps({"brief": "generated", "symbols": list(args.symbols)}, ensure_ascii=False))
-    print(json.dumps({"brief_journal": "saved", "records": saved, "skipped": skipped}, ensure_ascii=False))
     if telegram_config is not None:
         from .telegram import send_message
         send_message(text, telegram_config)
         print(json.dumps({"brief": "sent"}, ensure_ascii=False))
+
+
+def _run_setup_check(
+    args: argparse.Namespace,
+    journal_path: Path,
+    telegram_config: TelegramConfig | None,
+) -> None:
+    markets = [
+        load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
+        for symbol in args.symbols
+    ]
+    now = datetime.now(timezone.utc)
+    previous = load_latest_setups(journal_path)
+    emitted = 0
+    sent = 0
+    paper_entries = 0
+
+    for market in markets:
+        candidate = analyze_actionable_setup(market, now_utc=now)
+        events = reconcile_setup_state(candidate, previous, market, now_utc=now)
+        for event in events:
+            notify_event = should_notify_setup_event(event, previous)
+            if not save_setup_event(event, journal_path):
+                continue
+            emitted += 1
+            previous.append(event)
+            if event.status == TRIGGERED and save_signal(setup_to_signal(event), journal_path):
+                paper_entries += 1
+            if telegram_config is not None and notify_event:
+                from .telegram import send_message
+
+                send_message(format_setup_message(event), telegram_config)
+                sent += 1
+
+    print(
+        json.dumps(
+            {
+                "setup_check": "completed",
+                "symbols": list(args.symbols),
+                "state_changes": emitted,
+                "paper_entries": paper_entries,
+                "messages_sent": sent,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def _run_move_alert(args: argparse.Namespace, telegram_config: TelegramConfig | None) -> None:

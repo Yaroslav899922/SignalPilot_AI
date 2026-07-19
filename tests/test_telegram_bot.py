@@ -29,22 +29,26 @@ class TelegramBotTests(unittest.TestCase):
         message = format_report_message(
             {
                 "signals": 10,
-                "long": 2,
-                "short": 1,
-                "no_trade": 7,
-                "pending": 1,
-                "target_hit": 1,
-                "stop_hit": 1,
-                "no_result": 0,
-                "win_rate": 0.5,
+                "confirmed_entries": 3,
+                "confirmed_pending": 1,
+                "confirmed_target_hit": 1,
+                "confirmed_stop_hit": 1,
+                "confirmed_no_result": 0,
+                "confirmed_win_rate": 0.5,
+                "confirmed_result_R": 0.38,
+                "confirmed_baseline_R": -0.12,
+                "confirmed_edge_R": 0.5,
+                "legacy_market_brief_rows": 7,
             }
         )
 
         self.assertIn("<b>Звіт SignalPilot</b>", message)
-        self.assertIn("<b>Всього записів:</b> 10", message)
-        self.assertIn("<b>НЕ ВХОДИТИ:</b> 7", message)
-        self.assertIn("<b>Win rate:</b> 50.0%", message)
-        self.assertIn("SignalPilot не відкриває угоди", message)
+        self.assertIn("<b>Входів:</b> 3", message)
+        self.assertIn("<b>Успішність завершених:</b> 50.0%", message)
+        self.assertIn("<b>Результат входів:</b> +0.38R", message)
+        self.assertIn("<b>Якби просто тримали:</b> -0.12R", message)
+        self.assertIn("<b>Старі оглядові плани (не входи):</b> 7", message)
+        self.assertIn("без реальних угод", message)
 
     def test_run_telegram_bot_replies_to_report_and_advances_offset(self):
         with tempfile.TemporaryDirectory() as temp_dir:

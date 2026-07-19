@@ -38,6 +38,9 @@ class Signal:
     source: str = "signalpilot"
     entry_low: float | None = None
     entry_high: float | None = None
+    setup_id: str = ""
+    setup_status: str = ""
+    expires_at: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)

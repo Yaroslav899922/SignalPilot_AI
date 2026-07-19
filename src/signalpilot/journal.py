@@ -25,8 +25,8 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 created_at, symbol, interval, direction, market_regime, close_price,
                 funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
                 entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
-                trailing_plan, pattern, setup_score, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trailing_plan, pattern, setup_score, source, setup_id, setup_status, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal.created_at,
@@ -52,6 +52,9 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 signal.pattern,
                 signal.setup_score,
                 signal.source,
+                signal.setup_id,
+                signal.setup_status,
+                signal.expires_at,
             ),
         )
         connection.commit()
@@ -100,7 +103,7 @@ def load_signal_rows(db_path: str | Path, limit: int = 500) -> list[dict[str, ob
                    targets_json, entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
                    activated_at, evaluated_at, outcome, max_favorable_price, max_adverse_price,
                    trailing_plan, pattern, setup_score, source,
-                   result_R, baseline_R, edge_R
+                   result_R, baseline_R, edge_R, setup_id, setup_status, expires_at
             FROM signals
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -140,6 +143,24 @@ def summarize_journal(db_path: str | Path) -> dict[str, object]:
         target_hit = outcome_counts.get("target_hit", 0)
         stop_hit = outcome_counts.get("stop_hit", 0)
         resolved = target_hit + stop_hit
+        actionable_rows = connection.execute(
+            """
+            SELECT direction, outcome, result_R, baseline_R, edge_R
+            FROM signals
+            WHERE source = 'actionable_alert'
+            """
+        ).fetchall()
+        actionable_target = sum(row["outcome"] == "target_hit" for row in actionable_rows)
+        actionable_stop = sum(row["outcome"] == "stop_hit" for row in actionable_rows)
+        actionable_resolved = actionable_target + actionable_stop
+        actionable_pending = sum(
+            row["direction"] in ("LONG", "SHORT")
+            and (row["outcome"] is None or row["outcome"] == "not_enough_data")
+            for row in actionable_rows
+        )
+        legacy_market_brief = int(
+            connection.execute("SELECT COUNT(*) FROM signals WHERE source = 'market_brief'").fetchone()[0]
+        )
 
         return {
             "signals": total,
@@ -152,6 +173,16 @@ def summarize_journal(db_path: str | Path) -> dict[str, object]:
             "no_result": outcome_counts.get("no_result", 0),
             "not_activated": outcome_counts.get("not_activated", 0),
             "win_rate": target_hit / resolved if resolved else None,
+            "confirmed_entries": len(actionable_rows),
+            "confirmed_pending": actionable_pending,
+            "confirmed_target_hit": actionable_target,
+            "confirmed_stop_hit": actionable_stop,
+            "confirmed_no_result": sum(row["outcome"] == "no_result" for row in actionable_rows),
+            "confirmed_win_rate": actionable_target / actionable_resolved if actionable_resolved else None,
+            "confirmed_result_R": _sum_optional(actionable_rows, "result_R"),
+            "confirmed_baseline_R": _sum_optional(actionable_rows, "baseline_R"),
+            "confirmed_edge_R": _sum_optional(actionable_rows, "edge_R"),
+            "legacy_market_brief_rows": legacy_market_brief,
         }
     finally:
         connection.close()
@@ -237,7 +268,10 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             source TEXT NOT NULL DEFAULT 'signalpilot',
             result_R REAL,
             baseline_R REAL,
-            edge_R REAL
+            edge_R REAL,
+            setup_id TEXT NOT NULL DEFAULT '',
+            setup_status TEXT NOT NULL DEFAULT '',
+            expires_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -270,6 +304,9 @@ _ADDED_COLUMNS = {
     "result_R": "result_R REAL",
     "baseline_R": "baseline_R REAL",
     "edge_R": "edge_R REAL",
+    "setup_id": "setup_id TEXT NOT NULL DEFAULT ''",
+    "setup_status": "setup_status TEXT NOT NULL DEFAULT ''",
+    "expires_at": "expires_at TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -281,6 +318,43 @@ def _decode_signal_row(row: sqlite3.Row) -> dict[str, object]:
 
 
 def _signal_exists(connection: sqlite3.Connection, signal: Signal, targets_json: str) -> bool:
+    if signal.setup_id:
+        row = connection.execute(
+            "SELECT 1 FROM signals WHERE setup_id = ? LIMIT 1",
+            (signal.setup_id,),
+        ).fetchone()
+        return row is not None
+    if signal.source == "market_brief":
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM signals
+            WHERE symbol = ?
+              AND created_at = ?
+              AND interval = ?
+              AND direction = ?
+              AND (close_price = ? OR (close_price IS NULL AND ? IS NULL))
+              AND entry_zone = ?
+              AND (stop = ? OR (stop IS NULL AND ? IS NULL))
+              AND targets_json = ?
+              AND pattern = ?
+            LIMIT 1
+            """,
+            (
+                signal.symbol,
+                signal.created_at,
+                signal.interval,
+                signal.direction,
+                signal.close_price,
+                signal.close_price,
+                signal.entry_zone,
+                signal.stop,
+                signal.stop,
+                targets_json,
+                signal.pattern,
+            ),
+        ).fetchone()
+        return row is not None
     row = connection.execute(
         """
         SELECT 1
@@ -335,4 +409,19 @@ def _empty_summary() -> dict[str, object]:
         "no_result": 0,
         "not_activated": 0,
         "win_rate": None,
+        "confirmed_entries": 0,
+        "confirmed_pending": 0,
+        "confirmed_target_hit": 0,
+        "confirmed_stop_hit": 0,
+        "confirmed_no_result": 0,
+        "confirmed_win_rate": None,
+        "confirmed_result_R": None,
+        "confirmed_baseline_R": None,
+        "confirmed_edge_R": None,
+        "legacy_market_brief_rows": 0,
     }
+
+
+def _sum_optional(rows: list[sqlite3.Row], column: str) -> float | None:
+    values = [float(row[column]) for row in rows if row[column] is not None]
+    return round(sum(values), 4) if values else None

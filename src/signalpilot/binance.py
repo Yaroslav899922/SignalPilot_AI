@@ -22,12 +22,25 @@ def fetch_klines(
     interval: str = "1h",
     limit: int = DEFAULT_KLINE_LIMIT,
     base_url: str = BINANCE_FUTURES_BASE_URL,
+    end_time: datetime | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Fetch closed Binance USD-M futures candles; fall back to spot if futures is geo-blocked."""
+    params: dict[str, object] = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": limit,
+    }
+    if end_time is not None:
+        end = pd.Timestamp(end_time)
+        if end.tzinfo is None:
+            end = end.tz_localize(timezone.utc)
+        else:
+            end = end.tz_convert(timezone.utc)
+        params["endTime"] = int(end.timestamp() * 1000)
     try:
         raw_rows = _get_json(
             "/fapi/v1/klines",
-            {"symbol": symbol.upper(), "interval": interval, "limit": limit},
+            params,
             base_url,
         )
     except HTTPError as error:
@@ -35,7 +48,7 @@ def fetch_klines(
             raise
         raw_rows = _get_json(
             "/api/v3/klines",
-            {"symbol": symbol.upper(), "interval": interval, "limit": limit},
+            params,
             BINANCE_SPOT_BASE_URL,
         )
 
@@ -51,7 +64,7 @@ def fetch_klines(
         }
         for row in raw_rows
     ]
-    return _closed_candles(pd.DataFrame(rows))
+    return _closed_candles(pd.DataFrame(rows), now_utc=end_time)
 
 
 def fetch_open_interest(

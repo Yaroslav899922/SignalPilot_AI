@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from signalpilot import apps_script_journal
+from signalpilot.actionable import ActionableSetup, SetupCondition
 from signalpilot.signals import Signal
 
 
@@ -99,6 +100,33 @@ class AppsScriptJournalTests(unittest.TestCase):
             ):
                 self.assertEqual(apps_script_journal.summarize_journal(), summary)
 
+    def test_save_setup_event_posts_stable_state_payload(self):
+        setup = _setup()
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "inserted": True}),
+            ) as urlopen:
+                inserted = apps_script_journal.save_setup_event(setup)
+
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertTrue(inserted)
+        self.assertEqual(payload["action"], "save_setup_event")
+        self.assertEqual(payload["setup"]["setup_id"], setup.setup_id)
+        self.assertEqual(payload["setup"]["status"], "ARMED")
+        self.assertEqual(payload["fingerprint"], setup.fingerprint)
+
+    def test_load_latest_setups_decodes_rows(self):
+        setup = _setup()
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "setups": [setup.to_dict()]}),
+            ):
+                rows = apps_script_journal.load_latest_setups()
+
+        self.assertEqual(rows, [setup])
+
     def test_missing_environment_raises_before_http_call(self):
         with patch.dict(os.environ, {}, clear=True):
             with patch("signalpilot.apps_script_journal.urlopen") as urlopen:
@@ -143,6 +171,31 @@ def _signal() -> Signal:
         invalidation="Below 95.00",
         reasons=("Test signal",),
         created_at="2026-06-01T00:00:00+00:00",
+    )
+
+
+def _setup() -> ActionableSetup:
+    return ActionableSetup(
+        setup_id="BTCUSDT-breakout-LONG-test",
+        symbol="BTCUSDT",
+        pattern="breakout_retest",
+        direction="LONG",
+        status="ARMED",
+        regime="uptrend",
+        current_price=100.0,
+        trigger_level=101.0,
+        entry_low=101.0,
+        entry_high=102.0,
+        stop=98.0,
+        targets=(106.0, 109.0),
+        risk_reward=1.5,
+        score=75.0,
+        action="Поки не входити.",
+        reason="Тест.",
+        invalidation="1h нижче 98.",
+        conditions=(SetupCondition("level", "Рівень", False),),
+        created_at="2026-07-19T18:00:00+00:00",
+        expires_at="2026-07-20T06:00:00+00:00",
     )
 
 

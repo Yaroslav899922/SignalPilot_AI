@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from .signals import Signal
+from .actionable import ActionableSetup
 
 
 API_URL_ENV = "SIGNALPILOT_JOURNAL_API_URL"
@@ -55,6 +56,19 @@ def summarize_journal(db_path: str | object = "") -> dict[str, object]:
     payload = _request("summarize_journal", {})
     summary = payload.get("summary", {})
     return summary if isinstance(summary, dict) else {}
+
+
+def save_setup_event(setup: ActionableSetup, db_path: str | object = "") -> bool:
+    payload = _request("save_setup_event", {"setup": setup.to_dict(), "fingerprint": setup.fingerprint})
+    return bool(payload.get("inserted", True))
+
+
+def load_latest_setups(db_path: str | object = "") -> list[ActionableSetup]:
+    payload = _request("load_latest_setups", {})
+    rows = payload.get("setups", [])
+    if not isinstance(rows, list):
+        return []
+    return [ActionableSetup.from_dict(row) for row in rows if isinstance(row, dict)]
 
 
 def _request(action: str, body: dict[str, object]) -> dict[str, object]:

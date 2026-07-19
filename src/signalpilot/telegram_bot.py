@@ -87,26 +87,38 @@ def handle_update(
 
 
 def format_report_message(summary: dict[str, object]) -> str:
-    win_rate = summary.get("win_rate")
-    win_rate_text = "-" if win_rate is None else f"{float(win_rate):.1%}"
+    win_rate = summary.get("confirmed_win_rate")
+    win_rate_text = (
+        "ще немає завершених входів" if win_rate is None else f"{float(win_rate):.1%}"
+    )
     return "\n".join(
         [
             "<b>Звіт SignalPilot</b>",
             "",
-            f"<b>Всього записів:</b> {summary.get('signals', 0)}",
-            f"<b>LONG:</b> {summary.get('long', 0)}",
-            f"<b>SHORT:</b> {summary.get('short', 0)}",
-            f"<b>НЕ ВХОДИТИ:</b> {summary.get('no_trade', 0)}",
-            f"<b>Очікують оцінки:</b> {summary.get('pending', 0)}",
+            "<b>Тільки підтверджені входи</b>",
+            f"<b>Входів:</b> {summary.get('confirmed_entries', 0)}",
+            f"<b>Ціль спрацювала:</b> {summary.get('confirmed_target_hit', 0)}",
+            f"<b>Захисний вихід:</b> {summary.get('confirmed_stop_hit', 0)}",
+            f"<b>Ще перевіряються:</b> {summary.get('confirmed_pending', 0)}",
+            f"<b>Без чіткого результату:</b> {summary.get('confirmed_no_result', 0)}",
+            f"<b>Успішність завершених:</b> {win_rate_text}",
             "",
-            f"<b>Target hit:</b> {summary.get('target_hit', 0)}",
-            f"<b>Stop hit:</b> {summary.get('stop_hit', 0)}",
-            f"<b>No result:</b> {summary.get('no_result', 0)}",
-            f"<b>Win rate:</b> {win_rate_text}",
+            f"<b>Результат входів:</b> {_format_r(summary.get('confirmed_result_R'))}",
+            f"<b>Якби просто тримали:</b> {_format_r(summary.get('confirmed_baseline_R'))}",
+            f"<b>Перевага сигналів:</b> {_format_r(summary.get('confirmed_edge_R'))}",
             "",
-            "Це paper-test статистика. SignalPilot не відкриває угоди.",
+            f"<b>Старі оглядові плани (не входи):</b> {summary.get('legacy_market_brief_rows', 0)}",
+            "Це навчальна перевірка без реальних угод.",
         ]
     )
+
+
+def _format_r(value: object) -> str:
+    if value is None:
+        return "ще немає даних"
+    number = float(value)
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:.2f}R"
 
 
 def _reply_with_market_scan(
