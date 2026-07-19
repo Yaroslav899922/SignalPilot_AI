@@ -1,8 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
-from signalpilot.paper import evaluate_signal
+from signalpilot.journal import save_signal
+from signalpilot.paper import evaluate_journal, evaluate_signal
+from signalpilot.signals import Signal
 
 
 class PaperEvaluationTests(unittest.TestCase):
@@ -155,6 +159,63 @@ class PaperEvaluationTests(unittest.TestCase):
         self.assertEqual(result.result_R, 1.976)
         self.assertIsNotNone(result.baseline_R)
         self.assertIsNotNone(result.edge_R)
+
+
+class EvaluateJournalAgeGateTests(unittest.TestCase):
+    def test_young_plan_waits_for_full_window_before_evaluation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            save_signal(_plan("BTCUSDT", created_at="2026-07-19T00:00:00+00:00"), db_path)  # id=1, молодий
+            save_signal(_plan("ETHUSDT", created_at="2026-07-16T00:00:00+00:00"), db_path)  # id=2, старий
+
+            fetch_calls = []
+
+            def fake_fetcher(symbol, interval, limit):
+                fetch_calls.append(symbol)
+                open_times = pd.date_range("2026-07-16T00:00:00Z", periods=120, freq="h")
+                return pd.DataFrame(
+                    {
+                        "open_time": open_times,
+                        "open": [100.0] * 120,
+                        "high": [101.0] * 120,
+                        "low": [99.0] * 120,
+                        "close": [100.0] * 120,
+                    }
+                )
+
+            results = evaluate_journal(
+                str(db_path),
+                lookahead_candles=48,
+                fetcher=fake_fetcher,
+                now=pd.Timestamp("2026-07-19T06:00:00Z"),
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].signal_id, 2)
+            self.assertEqual(len(fetch_calls), 1)
+            self.assertNotEqual(results[0].outcome, "not_enough_data")
+
+
+def _plan(symbol: str, created_at: str) -> Signal:
+    return Signal(
+        symbol=symbol,
+        interval="1h",
+        direction="LONG",
+        market_regime="uptrend",
+        close_price=100.0,
+        funding_rate=None,
+        open_interest=None,
+        long_short_ratio=None,
+        spread_pct=None,
+        entry_zone="",
+        stop=95.0,
+        targets=(110.0,),
+        risk_reward=2.0,
+        confidence="medium",
+        invalidation="",
+        reasons=("test",),
+        created_at=created_at,
+    )
 
 
 def _signal(direction: str, stop: float, target: float) -> dict[str, object]:

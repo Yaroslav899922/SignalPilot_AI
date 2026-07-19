@@ -34,9 +34,13 @@ def evaluate_journal(
     db_path: str,
     lookahead_candles: int,
     fetcher=fetch_klines,
+    now: pd.Timestamp | None = None,
 ) -> list[EvaluationResult]:
     results = []
+    now_ts = now if now is not None else pd.Timestamp.now(tz="utc")
     for signal in load_evaluable_signals(db_path):
+        if not _evaluation_window_closed(signal, lookahead_candles, now_ts):
+            continue
         candles = fetcher(
             symbol=str(signal["symbol"]),
             interval=str(signal["interval"]),
@@ -184,6 +188,31 @@ def _candle_time(row: pd.Series) -> str | None:
     if "open_time" not in row.index:
         return None
     return pd.to_datetime(row["open_time"], utc=True).isoformat()
+
+
+_INTERVAL_HOURS = {
+    "5m": 5 / 60,
+    "15m": 0.25,
+    "30m": 0.5,
+    "1h": 1.0,
+    "2h": 2.0,
+    "4h": 4.0,
+    "1d": 24.0,
+}
+
+
+def _evaluation_window_closed(
+    signal: dict[str, object],
+    lookahead_candles: int,
+    now: pd.Timestamp,
+) -> bool:
+    """True, коли повне вікно спостереження плану вже минуло і його час оцінювати."""
+    try:
+        created = pd.to_datetime(str(signal["created_at"]), utc=True)
+    except (KeyError, TypeError, ValueError):
+        return True
+    hours = _INTERVAL_HOURS.get(str(signal.get("interval") or "1h"), 1.0)
+    return bool(now >= created + pd.Timedelta(hours=lookahead_candles * hours))
 
 
 def _future_candles(candles: pd.DataFrame, created_at: str, lookahead_candles: int) -> pd.DataFrame:
