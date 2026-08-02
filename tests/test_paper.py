@@ -221,6 +221,31 @@ class PaperEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "target_hit")
 
+    def test_actionable_does_not_finalize_when_last_explicit_candle_is_missing(self):
+        signal = {
+            **_signal(direction="LONG", stop=95.0, target=110.0),
+            "interval": "15m",
+            "source": "actionable_alert",
+            "created_at": "2026-05-31T00:00:00+00:00",
+            "triggered_at": "2026-05-31T00:00:00+00:00",
+            "expires_at": "2026-05-31T00:30:00+00:00",
+            "close_price": 100.0,
+        }
+        candles = pd.DataFrame(
+            {
+                "open_time": pd.to_datetime(["2026-05-31T00:00:00Z"], utc=True),
+                "close_time": pd.to_datetime(["2026-05-31T00:15:00Z"], utc=True),
+                "open": [100.0],
+                "high": [106.0],
+                "low": [99.0],
+                "close": [105.0],
+            }
+        )
+
+        result = evaluate_signal(signal, candles, lookahead_candles=48)
+
+        self.assertEqual(result.outcome, "not_enough_data")
+
     def test_actionable_future_expiry_blocks_evaluation_even_when_generic_age_has_passed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "signals.sqlite3"

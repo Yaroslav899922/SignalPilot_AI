@@ -301,8 +301,7 @@ def _explicit_window_covered(
     close_times = _candle_close_times(candles, signal)
     if close_times.empty:
         return False
-    hours = _INTERVAL_HOURS.get(str(signal.get("interval") or "1h"), 1.0)
-    return bool(close_times.max() + pd.Timedelta(hours=hours) >= deadline)
+    return bool(close_times.max() >= deadline)
 
 
 def _actionable_activated_at(signal: dict[str, object]) -> str | None:
