@@ -321,7 +321,12 @@ def _triggered_terminal_event(
     now: datetime,
 ) -> ActionableSetup | None:
     try:
-        candles = _closed_candles_since(market.frame("15m").candles, setup.created_at, now)
+        candles = _closed_candles_since(
+            market.frame("15m").candles,
+            setup.created_at,
+            setup.expires_at,
+            now,
+        )
     except KeyError:
         return None
     if candles.empty or not {"high", "low"}.issubset(candles.columns):
@@ -345,22 +350,34 @@ def _triggered_terminal_event(
     return None
 
 
-def _closed_candles_since(candles: pd.DataFrame, created_at: str, now: datetime) -> pd.DataFrame:
+def _closed_candles_since(
+    candles: pd.DataFrame,
+    created_at: str,
+    expires_at: str,
+    now: datetime,
+) -> pd.DataFrame:
     if candles.empty:
         return candles
     triggered_at = pd.to_datetime(created_at, utc=True, errors="coerce")
     if pd.isna(triggered_at):
         return candles.tail(1)
-    if "close_time" in candles.columns:
-        event_times = pd.to_datetime(candles["close_time"], utc=True, errors="coerce")
-        eligible = candles.loc[(event_times > triggered_at) & (event_times <= pd.Timestamp(now))].copy()
-        return eligible.assign(_event_time=event_times.loc[eligible.index]).sort_values("_event_time").drop(
+    now_ts = pd.Timestamp(now)
+    expires = pd.to_datetime(expires_at, utc=True, errors="coerce")
+    window_end = now_ts if pd.isna(expires) else min(now_ts, expires)
+    if "open_time" in candles.columns:
+        open_times = pd.to_datetime(candles["open_time"], utc=True, errors="coerce")
+        eligible_mask = (open_times >= triggered_at) & (open_times < window_end)
+        if "close_time" in candles.columns:
+            close_times = pd.to_datetime(candles["close_time"], utc=True, errors="coerce")
+            eligible_mask &= close_times <= now_ts
+        eligible = candles.loc[eligible_mask].copy()
+        return eligible.assign(_event_time=open_times.loc[eligible.index]).sort_values("_event_time").drop(
             columns="_event_time"
         )
-    if "open_time" in candles.columns:
-        event_times = pd.to_datetime(candles["open_time"], utc=True, errors="coerce")
-        eligible = candles.loc[(event_times >= triggered_at) & (event_times <= pd.Timestamp(now))].copy()
-        return eligible.assign(_event_time=event_times.loc[eligible.index]).sort_values("_event_time").drop(
+    if "close_time" in candles.columns:
+        close_times = pd.to_datetime(candles["close_time"], utc=True, errors="coerce")
+        eligible = candles.loc[(close_times > triggered_at) & (close_times <= window_end)].copy()
+        return eligible.assign(_event_time=close_times.loc[eligible.index]).sort_values("_event_time").drop(
             columns="_event_time"
         )
     return candles.tail(1)

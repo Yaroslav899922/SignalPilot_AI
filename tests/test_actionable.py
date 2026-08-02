@@ -280,6 +280,71 @@ class ActionableSetupTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].status, STOPPED)
 
+    def test_triggered_setup_ignores_touch_after_its_evaluation_window(self):
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+        market = _with_15m_candles(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            [
+                {
+                    "open_time": "2026-07-20T06:00:00Z",
+                    "close_time": "2026-07-20T06:14:59Z",
+                    "high": setup.targets[0] + 0.1,
+                    "low": setup.stop + 0.1,
+                }
+            ],
+        )
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            market,
+            now_utc=datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, "TIMED_OUT")
+
+    def test_triggered_setup_ignores_candle_that_opened_before_trigger(self):
+        triggered_at = datetime(2026, 7, 19, 18, 7, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+        neutral_high = setup.targets[0] - 0.1
+        neutral_low = setup.stop + 0.1
+        market = _with_15m_candles(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            [
+                {
+                    "open_time": "2026-07-19T18:00:00Z",
+                    "close_time": "2026-07-19T18:14:59Z",
+                    "high": setup.targets[0] + 0.1,
+                    "low": neutral_low,
+                },
+                {
+                    "open_time": "2026-07-19T18:15:00Z",
+                    "close_time": "2026-07-19T18:29:59Z",
+                    "high": neutral_high,
+                    "low": neutral_low,
+                },
+            ],
+        )
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            market,
+            now_utc=datetime(2026, 7, 19, 18, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(events, [])
+
     def test_watch_is_quiet_but_armed_and_confirmed_are_announced(self):
         now = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
         armed = analyze_actionable_setup(
