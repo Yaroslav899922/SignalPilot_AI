@@ -50,7 +50,13 @@
 - [x] Крок 1: повідомлення — КОД ГОТОВИЙ, коміт `2c6630b`, 210 тестів passed. Зроблено: ПЛАН ОНОВЛЕНО (одне повідомлення замість пари), НАПРЯМОК ЗМІНИВСЯ, рядок контексту ринку (двопрохідний setup-check у cli.py), змішаний чекліст (повний у первинних/готових, короткий "Готовність: X з Y" в оновленнях і брифі), шапка РИНОК у брифі, конкретні причини скасувань. Журнал/event_id НЕ чіпались (тільки шар доставки). Живе ввімкнення — після push у кроці 4 (Actions → Telegram → логи).
 - [x] Крок 2: swing_v2 — ЗАВЕРШЕНО, гіпотеза №7 **ЗАКРИТА** (коміт `1077f09`, 215 тестів passed). Ядро trail провалило ворота рішуче: expectancy train −0.485R / test −0.581R, edge vs v1 −0.50/−0.62R (CI повністю нижче 0). Діагноз: свінги n=2 підтверджуються надто часто → стоп впритул, 100% виходів по стопу. 3R/4R не допомагають. Урок у parking lot HYPOTHESES.md (вільніший трейл n=3–5 / після +1R / chandelier — ОКРЕМА гіпотеза, не запускати без погодження). Код: rig/swing_exits.py (паритет із движком закріплено тестом), rig/swing2_report.py, звіт reports/rig-swing2-2026-08-02.md.
 - [x] Крок 3: cohort analyzer — ЗАВЕРШЕНО (коміт `4ed5fa7`, 224 тести passed). Модуль `src/signalpilot/cohort_analysis.py`: extract_cohort (правило включення §2 + популяції §7), block_bootstrap_ci (§8: 7-денні кругові блоки, PCG64 seed 20260802, 50k реплік, event-weighted mean), concentration_checks, confirmatory_verdict (passed/closed/inconclusive/insufficient_data), build_report. Edge перераховується з result_R−baseline_R, розбіжності зі збереженим edge_R позначаються. 9 тестів на синтетичних fixtures. Крок 8 порядку cutover розблоковано; measurement_start_utc ЛИШАЄТЬСЯ TBD до живого деплою (окрема команда).
-- [ ] Крок 4: merge + push — не почато (push робить користувач; після push перевірити Actions і нові повідомлення в Telegram)
+- [x] Крок 4: merge — ЗРОБЛЕНО локально (fast-forward, main = fix/measurement-integrity = `ca4716e`+, 28 комітів). **PUSH ЧЕКАЄ КОРИСТУВАЧА**: `cd D:\Projects\SignalPilot; git push origin main`. Після push: вручну запустити GitHub Actions (market-brief.yml) → перевірити нові повідомлення в Telegram (ПЛАН ОНОВЛЕНО, контекст ринку, шапка РИНОК) → глянути логи. Якщо щось зламалось — відкат: користувач робить `git revert` або повідомляє сюди.
+
+## Що лишилось у черзі ПІСЛЯ цієї сесії (за окремими командами)
+
+1. Перевірка нових повідомлень наживо (після push + Actions).
+2. v3.1 cutover за розділом 10 протоколу: деплой Apps Script (Chrome, редактор Monaco — нотатки в Notion 2026-07-19) → перевірка аркушів/scheduler_runs → пара STARTED→FINISHED → фіксація measurement_start_utc у протоколі. Лише за командою "погнали на деплой".
+3. Можливі нові гіпотези з parking lot (BB-squeeze + swing; вільніший трейл) — тільки після пре-реєстрації.
 
 ## Ключові коміти сесії 2026-08-02
 
