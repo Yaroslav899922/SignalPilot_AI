@@ -7,6 +7,7 @@ import pandas as pd
 from signalpilot.actionable import (
     ARMED,
     EXPIRED,
+    INVALIDATED,
     STOPPED,
     TARGET_HIT,
     TIMED_OUT,
@@ -496,6 +497,68 @@ class ActionableSetupTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].setup_id, first.setup_id)
         self.assertNotEqual(events[0].to_dict().get("event_id"), first.to_dict().get("event_id"))
+
+    def test_same_level_rearms_at_but_not_before_cooldown_boundary(self):
+        market = _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0)
+        first = analyze_actionable_setup(
+            market,
+            now_utc=datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc),
+        )
+        assert first is not None
+        retired = replace(first, status=TARGET_HIT, created_at="2026-07-19T19:00:00+00:00")
+
+        just_before = datetime(2026, 7, 20, 6, 59, 59, tzinfo=timezone.utc)
+        before_candidate = analyze_actionable_setup(market, now_utc=just_before)
+        assert before_candidate is not None
+        self.assertEqual(
+            reconcile_setup_state(before_candidate, [first, retired], market, now_utc=just_before),
+            [],
+        )
+
+        at_boundary = datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc)
+        boundary_candidate = analyze_actionable_setup(market, now_utc=at_boundary)
+        assert boundary_candidate is not None
+        boundary_events = reconcile_setup_state(
+            boundary_candidate,
+            [first, retired],
+            market,
+            now_utc=at_boundary,
+        )
+        self.assertEqual(len(boundary_events), 1)
+        self.assertNotEqual(boundary_events[0].event_id, first.event_id)
+
+    def test_policy_upgrade_starts_a_clean_event_instead_of_relabeling_legacy_event(self):
+        armed_market = _market(
+            one_hour_close=116.0,
+            one_hour_low=114.8,
+            volume=900.0,
+            confirm_macd=0.1,
+        )
+        armed = analyze_actionable_setup(
+            armed_market,
+            now_utc=datetime(2026, 7, 19, 17, 0, tzinfo=timezone.utc),
+        )
+        assert armed is not None
+        legacy_payload = armed.to_dict()
+        for key in ("event_id", "policy_version", "detected_at"):
+            legacy_payload.pop(key)
+        legacy_armed = type(armed).from_dict(legacy_payload)
+
+        triggered_market = _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0)
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        candidate = analyze_actionable_setup(triggered_market, now_utc=triggered_at)
+        assert candidate is not None
+        events = reconcile_setup_state(
+            candidate,
+            [legacy_armed],
+            triggered_market,
+            now_utc=triggered_at,
+        )
+
+        self.assertEqual([event.status for event in events], [INVALIDATED, TRIGGERED])
+        self.assertEqual(events[0].policy_version, "legacy_unversioned")
+        self.assertEqual(events[1].policy_version, "v3.1")
+        self.assertNotEqual(events[0].event_id, events[1].event_id)
 
     def test_actionable_signal_carries_policy_event_and_market_provenance(self):
         market = replace(

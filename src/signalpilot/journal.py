@@ -338,7 +338,12 @@ def _decode_signal_row(row: sqlite3.Row) -> dict[str, object]:
 def _signal_exists(connection: sqlite3.Connection, signal: Signal, targets_json: str) -> bool:
     if signal.event_id:
         row = connection.execute(
-            "SELECT 1 FROM signals WHERE event_id = ? LIMIT 1",
+            """
+            SELECT 1
+            FROM signals
+            WHERE COALESCE(NULLIF(event_id, ''), setup_id) = ?
+            LIMIT 1
+            """,
             (signal.event_id,),
         ).fetchone()
         return row is not None

@@ -317,7 +317,10 @@ def _continue_event(
     previous: ActionableSetup,
     now: datetime,
 ) -> ActionableSetup:
-    if candidate.setup_id != previous.setup_id:
+    if (
+        candidate.setup_id != previous.setup_id
+        or candidate.policy_version != previous.policy_version
+    ):
         return candidate
     newly_triggered = candidate.status == TRIGGERED and previous.status != TRIGGERED
     return replace(

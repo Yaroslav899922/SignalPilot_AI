@@ -583,7 +583,9 @@ function readRows_(sheet) {
 
 function signalExists_(rows, signal, targetsJson) {
   if (signal.event_id) {
-    return rows.some((row) => String(row.event_id || "") === String(signal.event_id));
+    return rows.some(
+      (row) => String(row.event_id || row.setup_id || "") === String(signal.event_id)
+    );
   }
   if (signal.setup_id) {
     return rows.some((row) => String(row.setup_id || "") === String(signal.setup_id));

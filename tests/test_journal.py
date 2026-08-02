@@ -173,6 +173,27 @@ class JournalTests(unittest.TestCase):
             {first.event_id, second.event_id},
         )
 
+    def test_actionable_dedupe_matches_migrated_legacy_setup_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            legacy = replace(
+                _signal(direction="LONG", created_at="2026-07-19T18:00:00+00:00"),
+                source="actionable_alert",
+                setup_id="BTCUSDT-breakout-retest-legacy-event",
+                event_id="",
+            )
+            continued = replace(
+                legacy,
+                created_at="2026-07-19T18:15:00+00:00",
+                event_id=legacy.setup_id,
+            )
+
+            self.assertTrue(save_signal(legacy, db_path))
+            self.assertFalse(save_signal(continued, db_path))
+            rows = load_signal_rows(db_path)
+
+        self.assertEqual(len(rows), 1)
+
     def test_summarize_journal_returns_empty_summary_for_missing_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = summarize_journal(Path(temp_dir) / "missing.sqlite3")
