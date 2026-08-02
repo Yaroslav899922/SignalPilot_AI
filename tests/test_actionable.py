@@ -1,11 +1,13 @@
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 from signalpilot.actionable import (
     ARMED,
+    EXPIRED,
+    STOPPED,
     TARGET_HIT,
     TRIGGERED,
     WATCH,
@@ -146,6 +148,138 @@ class ActionableSetupTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].status, TARGET_HIT)
 
+    def test_triggered_setup_times_out_instead_of_expiring_as_unactivated(self):
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            _market(
+                one_hour_close=116.0,
+                one_hour_low=114.8,
+                volume=1500.0,
+                last_high=setup.targets[0] - 0.1,
+                last_low=setup.stop + 0.1,
+            ),
+            now_utc=triggered_at + timedelta(hours=13),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, "TIMED_OUT")
+        self.assertNotEqual(events[0].status, EXPIRED)
+
+    def test_triggered_setup_replays_missed_closed_candles(self):
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+        neutral_high = setup.targets[0] - 0.1
+        neutral_low = setup.stop + 0.1
+        market = _with_15m_candles(
+            _market(
+                one_hour_close=116.0,
+                one_hour_low=114.8,
+                volume=1500.0,
+                last_high=neutral_high,
+                last_low=neutral_low,
+            ),
+            [
+                {
+                    "open_time": "2026-07-19T18:00:00Z",
+                    "close_time": "2026-07-19T18:14:59Z",
+                    "high": neutral_high,
+                    "low": neutral_low,
+                },
+                {
+                    "open_time": "2026-07-19T18:15:00Z",
+                    "close_time": "2026-07-19T18:29:59Z",
+                    "high": setup.targets[0] + 0.1,
+                    "low": neutral_low,
+                },
+                {
+                    "open_time": "2026-07-19T18:30:00Z",
+                    "close_time": "2026-07-19T18:44:59Z",
+                    "high": neutral_high,
+                    "low": neutral_low,
+                },
+            ],
+        )
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            market,
+            now_utc=datetime(2026, 7, 19, 18, 45, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, TARGET_HIT)
+
+    def test_untriggered_setup_still_expires_as_unactivated(self):
+        created_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(
+                one_hour_close=116.0,
+                one_hour_low=114.8,
+                volume=900.0,
+                confirm_macd=0.1,
+            ),
+            now_utc=created_at,
+        )
+        assert setup is not None
+        self.assertEqual(setup.status, ARMED)
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            _market(
+                one_hour_close=116.0,
+                one_hour_low=114.8,
+                volume=900.0,
+                confirm_macd=0.1,
+            ),
+            now_utc=created_at + timedelta(hours=13),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, EXPIRED)
+
+    def test_triggered_setup_uses_conservative_stop_first_tie_break(self):
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+        market = _with_15m_candles(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            [
+                {
+                    "open_time": "2026-07-19T18:00:00Z",
+                    "close_time": "2026-07-19T18:14:59Z",
+                    "high": setup.targets[0] + 0.1,
+                    "low": setup.stop - 0.1,
+                }
+            ],
+        )
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            market,
+            now_utc=datetime(2026, 7, 19, 18, 15, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, STOPPED)
+
     def test_watch_is_quiet_but_armed_and_confirmed_are_announced(self):
         now = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
         armed = analyze_actionable_setup(
@@ -265,6 +399,12 @@ def _uptrend_frame() -> MarketFrame:
             {"high": high, "low": low, "close": close, "ema50": ema50, "atr14": [4.0] * len(close)}
         ),
     )
+
+
+def _with_15m_candles(market: LiveMarketData, rows: list[dict[str, object]]) -> LiveMarketData:
+    frames = dict(market.frames)
+    frames["15m"] = replace(frames["15m"], candles=pd.DataFrame(rows))
+    return replace(market, frames=frames)
 
 
 if __name__ == "__main__":

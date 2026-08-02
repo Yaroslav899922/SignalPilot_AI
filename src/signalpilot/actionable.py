@@ -17,9 +17,10 @@ INVALIDATED = "INVALIDATED"
 TARGET_HIT = "TARGET_HIT"
 STOPPED = "STOPPED"
 EXPIRED = "EXPIRED"
+TIMED_OUT = "TIMED_OUT"
 
 ACTIVE_STATUSES = (WATCH, ARMED, TRIGGERED)
-TERMINAL_STATUSES = (INVALIDATED, TARGET_HIT, STOPPED, EXPIRED)
+TERMINAL_STATUSES = (INVALIDATED, TARGET_HIT, STOPPED, EXPIRED, TIMED_OUT)
 
 
 @dataclass(frozen=True)
@@ -213,6 +214,21 @@ def reconcile_setup_state(
             return []
         return [candidate]
 
+    if previous.status == TRIGGERED:
+        terminal = _triggered_terminal_event(previous, market, now)
+        if terminal is not None:
+            return [terminal]
+        if _expired(previous, now):
+            return [
+                previous.with_status(
+                    TIMED_OUT,
+                    action="Тестовий вхід завершено за часом; новий вхід за ним не робити.",
+                    reason="Після підтвердженого входу ціна не торкнулася ні цілі, ні стопа у відведений час.",
+                    now_utc=now,
+                )
+            ]
+        return []
+
     if _expired(previous, now):
         return [
             previous.with_status(
@@ -222,10 +238,6 @@ def reconcile_setup_state(
                 now_utc=now,
             )
         ]
-
-    if previous.status == TRIGGERED:
-        terminal = _triggered_terminal_event(previous, market, now)
-        return [] if terminal is None else [terminal]
 
     if candidate is None:
         return [
@@ -258,7 +270,7 @@ def should_notify_setup_event(
 
     if event.status == ARMED:
         return event.score >= 75.0
-    if event.status in {TRIGGERED, TARGET_HIT, STOPPED}:
+    if event.status in {TRIGGERED, TARGET_HIT, STOPPED, TIMED_OUT}:
         return True
     if event.status == WATCH:
         return False
@@ -309,44 +321,63 @@ def _triggered_terminal_event(
     now: datetime,
 ) -> ActionableSetup | None:
     try:
-        candles = market.frame("15m").candles.tail(1)
+        candles = _closed_candles_since(market.frame("15m").candles, setup.created_at, now)
     except KeyError:
         return None
     if candles.empty or not {"high", "low"}.issubset(candles.columns):
         return None
-    high = float(candles.iloc[-1]["high"])
-    low = float(candles.iloc[-1]["low"])
+    for _, candle in candles.iterrows():
+        status = _terminal_status(setup, high=float(candle["high"]), low=float(candle["low"]))
+        if status == STOPPED:
+            return setup.with_status(
+                STOPPED,
+                action="Тестовий план завершено. Новий вхід за ним не робити.",
+                reason="Ціна торкнулася рівня виходу зі збитком.",
+                now_utc=now,
+            )
+        if status == TARGET_HIT:
+            return setup.with_status(
+                TARGET_HIT,
+                action="Перша ціль досягнута; тестовий план завершено.",
+                reason="Ціна дійшла до першої запланованої цілі.",
+                now_utc=now,
+            )
+    return None
+
+
+def _closed_candles_since(candles: pd.DataFrame, created_at: str, now: datetime) -> pd.DataFrame:
+    if candles.empty:
+        return candles
+    triggered_at = pd.to_datetime(created_at, utc=True, errors="coerce")
+    if pd.isna(triggered_at):
+        return candles.tail(1)
+    if "close_time" in candles.columns:
+        event_times = pd.to_datetime(candles["close_time"], utc=True, errors="coerce")
+        eligible = candles.loc[(event_times > triggered_at) & (event_times <= pd.Timestamp(now))].copy()
+        return eligible.assign(_event_time=event_times.loc[eligible.index]).sort_values("_event_time").drop(
+            columns="_event_time"
+        )
+    if "open_time" in candles.columns:
+        event_times = pd.to_datetime(candles["open_time"], utc=True, errors="coerce")
+        eligible = candles.loc[(event_times >= triggered_at) & (event_times <= pd.Timestamp(now))].copy()
+        return eligible.assign(_event_time=event_times.loc[eligible.index]).sort_values("_event_time").drop(
+            columns="_event_time"
+        )
+    return candles.tail(1)
+
+
+def _terminal_status(setup: ActionableSetup, *, high: float, low: float) -> str | None:
     target = setup.targets[0]
     if setup.direction == "LONG":
         if low <= setup.stop:
-            return setup.with_status(
-                STOPPED,
-                action="Тестовий план завершено. Новий вхід за ним не робити.",
-                reason="Ціна торкнулася рівня виходу зі збитком.",
-                now_utc=now,
-            )
+            return STOPPED
         if high >= target:
-            return setup.with_status(
-                TARGET_HIT,
-                action="Перша ціль досягнута; тестовий план завершено.",
-                reason="Ціна дійшла до першої запланованої цілі.",
-                now_utc=now,
-            )
+            return TARGET_HIT
     else:
         if high >= setup.stop:
-            return setup.with_status(
-                STOPPED,
-                action="Тестовий план завершено. Новий вхід за ним не робити.",
-                reason="Ціна торкнулася рівня виходу зі збитком.",
-                now_utc=now,
-            )
+            return STOPPED
         if low <= target:
-            return setup.with_status(
-                TARGET_HIT,
-                action="Перша ціль досягнута; тестовий план завершено.",
-                reason="Ціна дійшла до першої запланованої цілі.",
-                now_utc=now,
-            )
+            return TARGET_HIT
     return None
 
 
@@ -980,6 +1011,7 @@ def _status_text(status: str) -> tuple[str, str]:
         TARGET_HIT: ("🎯", "ЦІЛЬ ДОСЯГНУТА"),
         STOPPED: ("🛑", "ВИХІД ЗІ ЗБИТКОМ"),
         EXPIRED: ("⌛", "ЧАС ПЛАНУ МИНУВ"),
+        TIMED_OUT: ("⏱️", "ВХІД ЗАВЕРШЕНО ЗА ЧАСОМ"),
     }.get(status, ("ℹ️", status))
 
 
