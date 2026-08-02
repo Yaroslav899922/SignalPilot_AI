@@ -263,7 +263,7 @@ def reconcile_setup_state(
         return [
             previous.with_status(
                 EXPIRED,
-                action="Не входити: час цього плану минув.",
+                action="Заявку зняти. Це не збиток — входу не було.",
                 reason="Сценарій не активувався у відведений час.",
                 now_utc=now,
             )
@@ -273,7 +273,7 @@ def reconcile_setup_state(
         return [
             previous.with_status(
                 INVALIDATED,
-                action="Не входити за старим планом.",
+                action="Заявку зняти; нового плану поки немає.",
                 reason="Ринкові умови більше не підтримують цей сценарій.",
                 now_utc=now,
             )
@@ -282,10 +282,22 @@ def reconcile_setup_state(
     if candidate.event_id == previous.event_id:
         return [] if candidate.status == previous.status else [candidate]
 
+    if candidate.direction == previous.direction:
+        cancel_action = (
+            f"Стару заявку від {_price(previous.trigger_level)} зняти; "
+            f"новий орієнтир {_price(candidate.trigger_level)}."
+        )
+        cancel_reason = (
+            f"Рівень входу змінився: {_price(previous.trigger_level)} → "
+            f"{_price(candidate.trigger_level)}; ціна пішла від старого рівня."
+        )
+    else:
+        cancel_action = "Стару заявку зняти обов'язково: напрямок змінився."
+        cancel_reason = "Ринок 4h перейшов в інший стан; старий напрямок недійсний."
     cancelled = previous.with_status(
         INVALIDATED,
-        action="Не входити за старим планом; рівень або напрямок змінився.",
-        reason="Система знайшла новий сценарій замість попереднього.",
+        action=cancel_action,
+        reason=cancel_reason,
         now_utc=now,
     )
     replacement = replace(candidate, created_at=_iso(now + timedelta(microseconds=1)))
@@ -469,24 +481,92 @@ def _expired(setup: ActionableSetup, now: datetime) -> bool:
     return _aware(expires) <= now
 
 
-def format_setup_message(setup: ActionableSetup) -> str:
-    symbol = setup.symbol.replace("USDT", "")
-    status_icon, status_label = _status_text(setup.status)
-    direction = "КУПІВЛЯ (LONG)" if setup.direction == "LONG" else "ПРОДАЖ (SHORT)"
-    pattern = _pattern_label(setup.pattern)
-    regime = _regime_label(setup.regime)
+_DIRECTION_BY_REGIME = {"uptrend": "вгору", "downtrend": "вниз"}
+
+_ACTIVE_STATUSES = {WATCH, ARMED, TRIGGERED}
+
+_SHORT_CONDITION = {
+    "level_break": "пробій рівня",
+    "retest": "ретест рівня",
+    "confirm_15m": "підтвердження 15m",
+    "momentum": "MACD",
+    "volume": "обсяг",
+    "not_chasing": "підхід ціни",
+    "trend": "тренд 4h",
+    "touch": "повернення до зони",
+    "edge": "межа діапазону",
+    "rejection": "відбій від межі",
+}
+
+
+def market_regime_for(market: LiveMarketData) -> str | None:
+    """Режим одного символа для рядка контексту ринку (безпечно на поганих даних)."""
+    try:
+        f1h = market.frame("1h")
+        f4h = market.frame("4h")
+        if _ready_row(f4h, _REGIME_COLUMNS) is None or _ready_row(f1h, _SETUP_COLUMNS) is None:
+            return None
+        return _market_regime(f4h, f1h)
+    except Exception:  # noqa: BLE001 — контекст не має валити основний потік
+        return None
+
+
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + f" і {names[-1]}"
+
+
+def market_context_line(regimes: dict[str, str | None], symbol: str) -> str | None:
+    """Один людський рядок: чи згодні інші монети з напрямком цієї."""
+    short = {s.replace("USDT", ""): _DIRECTION_BY_REGIME.get(r or "") for s, r in regimes.items()}
+    me = symbol.replace("USDT", "")
+    mine = short.get(me)
+    others = {name: d for name, d in short.items() if name != me}
+    if not others:
+        return None
+    oppose = [(name, d) for name, d in others.items() if d and mine and d != mine]
+    agree = [name for name, d in others.items() if d and d == mine]
+    if oppose:
+        name, direction = oppose[0]
+        return f"але {name} {direction} — обережніше"
+    if mine and agree and len(agree) == len(others):
+        return f"{_join_names([me] + agree)} в один бік"
+    if mine and agree:
+        return f"{_join_names(agree)} теж {mine}"
+    named = [name for name, d in others.items() if d]
+    dirs = {d for d in others.values() if d}
+    if not mine and len(dirs) == 1 and named:
+        return f"{_join_names(named)} {dirs.pop()}"
+    return "ринок без єдиного напрямку"
+
+
+def _full_checklist_lines(setup: ActionableSetup) -> list[str]:
     met = sum(condition.met for condition in setup.conditions)
     total = len(setup.conditions)
+    lines = [f"<b>Перевірки ({met}/{total}):</b>"]
+    for condition in setup.conditions:
+        marker = "✅" if condition.met else "⏳"
+        detail = f" — {escape(condition.detail)}" if condition.detail else ""
+        lines.append(f"{marker} {escape(condition.label)}{detail}")
+    return lines
 
+
+def _short_checklist_line(setup: ActionableSetup) -> str:
+    met = sum(condition.met for condition in setup.conditions)
+    total = len(setup.conditions)
+    waiting = [
+        _SHORT_CONDITION.get(condition.code, condition.label.lower())
+        for condition in setup.conditions
+        if not condition.met
+    ]
+    if not waiting:
+        return f"<b>Готовність:</b> {met} з {total} · всі перевірки виконані"
+    return f"<b>Готовність:</b> {met} з {total} · чекаємо: {escape(', '.join(waiting))}"
+
+
+def _plan_block(setup: ActionableSetup) -> list[str]:
     lines = [
-        f"{status_icon} <b>{escape(symbol)} — {status_label}</b>",
-        f"<b>Напрямок:</b> {direction}",
-        f"<b>Сценарій:</b> {escape(pattern)}",
-        f"<b>Ринок 4h:</b> {escape(regime)}",
-        "",
-        f"<b>Що відбувається:</b> {escape(setup.reason)}",
-        f"<b>Що робити зараз:</b> {escape(setup.action)}",
-        "",
         f"<b>Рівень, за яким стежимо:</b> {_price(setup.trigger_level)}",
         f"<b>Зона входу:</b> {_price(setup.entry_low)}–{_price(setup.entry_high)}",
         f"<b>Вихід зі збитком:</b> {_price(setup.stop)}",
@@ -497,24 +577,149 @@ def format_setup_message(setup: ActionableSetup) -> str:
         [
             f"<b>Потенціал цілі 1:</b> {setup.risk_reward:.1f} до 1 відносно ризику",
             "<b>Ризик тесту:</b> не більш як 0.5% умовного рахунку",
-            "",
-            f"<b>Перевірки ({met}/{total}):</b>",
         ]
     )
-    for condition in setup.conditions:
-        marker = "✅" if condition.met else "⏳"
-        detail = f" — {escape(condition.detail)}" if condition.detail else ""
-        lines.append(f"{marker} {escape(condition.label)}{detail}")
-    lines.extend(
-        [
-            "",
-            f"<b>План скасовано, якщо:</b> {escape(setup.invalidation)}",
-            f"<b>План діє до:</b> {_kyiv_time(setup.expires_at)}",
-            "",
-            "<i>Це тестова підказка. SignalPilot не відкриває угоду автоматично.</i>",
-        ]
-    )
+    return lines
+
+
+def _footer_lines(setup: ActionableSetup) -> list[str]:
+    return [
+        f"<b>План скасовано, якщо:</b> {escape(setup.invalidation)}",
+        f"<b>План діє до:</b> {_kyiv_time(setup.expires_at)}",
+        "",
+        "<i>Це тестова підказка. SignalPilot не відкриває угоду автоматично.</i>",
+    ]
+
+
+def _regime_context_line(setup: ActionableSetup, market_context: str | None) -> str:
+    line = f"<b>Ринок 4h:</b> {escape(_regime_label(setup.regime))}"
+    if market_context:
+        line += f" · {escape(market_context)}"
+    return line
+
+
+def _direction_text(setup: ActionableSetup) -> str:
+    return "КУПІВЛЯ (LONG)" if setup.direction == "LONG" else "ПРОДАЖ (SHORT)"
+
+
+def format_setup_message(
+    setup: ActionableSetup,
+    *,
+    market_context: str | None = None,
+    checklist: str = "full",
+) -> str:
+    symbol = setup.symbol.replace("USDT", "")
+    status_icon, status_label = _status_text(setup.status)
+
+    lines = [
+        f"{status_icon} <b>{escape(symbol)} — {status_label}</b>",
+        f"<b>Напрямок:</b> {_direction_text(setup)}",
+        f"<b>Сценарій:</b> {escape(_pattern_label(setup.pattern))}",
+        _regime_context_line(setup, market_context),
+        "",
+        f"<b>Що відбувається:</b> {escape(setup.reason)}",
+        f"<b>Що робити зараз:</b> {escape(setup.action)}",
+        "",
+        *_plan_block(setup),
+    ]
+    if setup.status in _ACTIVE_STATUSES:
+        lines.append("")
+        if checklist == "short":
+            lines.append(_short_checklist_line(setup))
+        else:
+            lines.extend(_full_checklist_lines(setup))
+    lines.append("")
+    lines.extend(_footer_lines(setup))
     return "\n".join(lines)
+
+
+def format_update_message(
+    previous: ActionableSetup,
+    replacement: ActionableSetup,
+    *,
+    market_context: str | None = None,
+) -> str:
+    """Одне повідомлення замість пари «скасовано + нове»: той самий напрямок, новий рівень."""
+    symbol = replacement.symbol.replace("USDT", "")
+    lines = [
+        f"🔄 <b>{escape(symbol)} — ПЛАН ОНОВЛЕНО</b>",
+        f"<b>Напрямок:</b> {_direction_text(replacement)} — без змін",
+        _regime_context_line(replacement, market_context),
+        "",
+        (
+            f"<b>Що змінилось:</b> рівень входу {_price(previous.trigger_level)} → "
+            f"{_price(replacement.trigger_level)}"
+        ),
+        f"<b>Чому:</b> {escape(replacement.reason)}",
+        (
+            f"<b>Що робити:</b> якщо заявка стояла від {_price(previous.trigger_level)} — зняти; "
+            f"новий орієнтир {_price(replacement.trigger_level)}."
+        ),
+        "",
+        *_plan_block(replacement),
+        "",
+        _short_checklist_line(replacement),
+        "",
+        *_footer_lines(replacement),
+    ]
+    return "\n".join(lines)
+
+
+def format_direction_change_message(
+    previous: ActionableSetup,
+    replacement: ActionableSetup,
+    *,
+    market_context: str | None = None,
+) -> str:
+    symbol = replacement.symbol.replace("USDT", "")
+    lines = [
+        f"🔁 <b>{escape(symbol)} — НАПРЯМОК ЗМІНИВСЯ</b>",
+        f"<b>Було:</b> {_direction_text(previous)} · <b>Стало:</b> {_direction_text(replacement)}",
+        _regime_context_line(replacement, market_context),
+        "",
+        f"<b>Причина:</b> {escape(replacement.reason)}",
+        "<b>Що робити:</b> стару заявку зняти обов'язково. Новий план — нижче.",
+        "",
+        *_plan_block(replacement),
+        "",
+        *_full_checklist_lines(replacement),
+        "",
+        *_footer_lines(replacement),
+    ]
+    return "\n".join(lines)
+
+
+def compose_setup_messages(
+    events_with_notify: list[tuple[ActionableSetup, bool]],
+    *,
+    market_context: str | None = None,
+) -> list[str]:
+    """Мінімальний набір повідомлень для збережених подій одного символа.
+
+    Пара «INVALIDATED + активна заміна» стає одним повідомленням: ПЛАН ОНОВЛЕНО
+    (той самий напрямок) або НАПРЯМОК ЗМІНИВСЯ. Журнал подій не змінюється —
+    це лише шар доставки.
+    """
+    events = [event for event, _ in events_with_notify]
+    if (
+        len(events) == 2
+        and events[0].status == INVALIDATED
+        and events[1].status in _ACTIVE_STATUSES
+        and events[0].symbol == events[1].symbol
+    ):
+        (old, old_notify), (new, new_notify) = events_with_notify
+        if new_notify:
+            if new.direction == old.direction:
+                return [format_update_message(old, new, market_context=market_context)]
+            return [format_direction_change_message(old, new, market_context=market_context)]
+        if old_notify:
+            return [format_setup_message(old, market_context=market_context)]
+        return []
+    return [
+        format_setup_message(event, market_context=market_context)
+        for event, notify in events_with_notify
+        if notify
+    ]
 
 
 def format_action_brief(
@@ -527,11 +732,39 @@ def format_action_brief(
     now = _aware(now_utc or datetime.now(timezone.utc))
     setup_by_symbol = {setup.symbol: setup for setup in setups}
     session = session_label or "Ринковий контроль"
+    regimes = {market.symbol: market_regime_for(market) for market in markets}
+    names = [symbol.replace("USDT", "") for symbol in regimes]
+    directions = {_DIRECTION_BY_REGIME.get(regime or "") for regime in regimes.values()}
+
     lines = [
         "📍 <b>SignalPilot — короткий план ринку</b>",
         f"{now.astimezone(_kyiv_zone()).strftime('%d.%m · %H:%M Київ')} · {escape(session)}",
         "",
     ]
+    if directions == {"вниз"}:
+        lines.extend(
+            [
+                f"📉 <b>РИНОК: перевага продавців — {_join_names(names)} в один бік</b>",
+                "Загальний напрямок дня: шукаємо тільки продаж.",
+                "",
+            ]
+        )
+    elif directions == {"вгору"}:
+        lines.extend(
+            [
+                f"📈 <b>РИНОК: перевага покупців — {_join_names(names)} в один бік</b>",
+                "Загальний напрямок дня: шукаємо тільки купівлю.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "⚖️ <b>РИНОК: без єдиного напрямку</b>",
+                "Сигнали монет можуть розходитись — працюємо обережно.",
+                "",
+            ]
+        )
     for market in markets:
         symbol = market.symbol.replace("USDT", "")
         setup = setup_by_symbol.get(market.symbol)
@@ -547,14 +780,14 @@ def format_action_brief(
         icon, label = _status_text(setup.status)
         lines.extend(
             [
-                f"{icon} <b>{escape(symbol)} — {label}</b>",
+                f"{icon} <b>{escape(symbol)} — {label}</b> · рівень {_price(setup.trigger_level)}",
                 f"{escape(_pattern_label(setup.pattern))} · {escape(_regime_label(setup.regime))}",
                 f"{escape(setup.action)}",
-                f"Рівень: {_price(setup.trigger_level)} · вхід: {_price(setup.entry_low)}–{_price(setup.entry_high)}",
+                _short_checklist_line(setup),
                 "",
             ]
         )
-    lines.append("Окремий детальний алерт прийде лише коли сценарій змінить стан.")
+    lines.append("Детальне повідомлення прийде, коли план буде готовий до входу.")
     return "\n".join(lines)
 
 
@@ -1108,7 +1341,7 @@ def _status_text(status: str) -> tuple[str, str]:
         WATCH: ("👀", "СПОСТЕРІГАЄМО"),
         ARMED: ("🟠", "ГОТУЄМОСЯ"),
         TRIGGERED: ("🟢", "ВХІД ПІДТВЕРДЖЕНО"),
-        INVALIDATED: ("❌", "СЦЕНАРІЙ СКАСОВАНО"),
+        INVALIDATED: ("❌", "ПЛАН СКАСОВАНО"),
         TARGET_HIT: ("🎯", "ЦІЛЬ ДОСЯГНУТА"),
         STOPPED: ("🛑", "ВИХІД ЗІ ЗБИТКОМ"),
         EXPIRED: ("⌛", "ЧАС ПЛАНУ МИНУВ"),

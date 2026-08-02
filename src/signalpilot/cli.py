@@ -11,8 +11,10 @@ from .binance import DEFAULT_KLINE_LIMIT
 from .actionable import (
     TRIGGERED,
     analyze_actionable_setup,
+    compose_setup_messages,
     format_action_brief,
-    format_setup_message,
+    market_context_line,
+    market_regime_for,
     reconcile_setup_state,
     should_notify_setup_event,
     setup_to_signal,
@@ -170,6 +172,10 @@ def _run_setup_check(
     failed_symbols: list[str] = []
     failures: list[dict[str, str]] = []
 
+    # Прохід 1: завантажити ринки й кандидатів для ВСІХ монет, щоб кожне
+    # повідомлення могло показати контекст ринку (BTC/ETH/SOL разом).
+    loaded = []
+    regimes = {}
     for symbol in args.symbols:
         try:
             for setup in previous:
@@ -188,7 +194,23 @@ def _run_setup_check(
                 limit=args.limit,
             )
             candidate = analyze_actionable_setup(market, now_utc=now)
+            regimes[symbol] = market_regime_for(market)
+            loaded.append((symbol, market, candidate))
+        except Exception as error:
+            failed_symbols.append(symbol)
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+
+    # Прохід 2: журнал і доставка. Пара "скасовано + заміна" стає одним
+    # повідомленням (ПЛАН ОНОВЛЕНО / НАПРЯМОК ЗМІНИВСЯ) — журнал не змінюється.
+    for symbol, market, candidate in loaded:
+        try:
             events = reconcile_setup_state(candidate, previous, market, now_utc=now)
+            saved_events = []
             for event in events:
                 notify_event = should_notify_setup_event(event, previous)
                 if event.status == TRIGGERED:
@@ -205,10 +227,13 @@ def _run_setup_check(
                     continue
                 emitted += 1
                 previous.append(event)
-                if telegram_config is not None and notify_event:
-                    from .telegram import send_message
+                saved_events.append((event, notify_event))
+            if telegram_config is not None and saved_events:
+                from .telegram import send_message
 
-                    send_message(format_setup_message(event), telegram_config)
+                context = market_context_line(regimes, symbol)
+                for text in compose_setup_messages(saved_events, market_context=context):
+                    send_message(text, telegram_config)
                     sent += 1
             checked_symbols.append(symbol)
         except Exception as error:

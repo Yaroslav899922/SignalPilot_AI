@@ -259,7 +259,7 @@ class CliTests(unittest.TestCase):
                                         "signalpilot.cli.save_triggered_event",
                                         return_value=(True, True),
                                     ):
-                                        with patch("signalpilot.cli.format_setup_message", return_value="<b>entry</b>"):
+                                        with patch("signalpilot.cli.compose_setup_messages", return_value=["<b>entry</b>"]):
                                             with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send:
                                                 with redirect_stdout(output):
                                                     exit_code = main(
