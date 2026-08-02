@@ -15,58 +15,63 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
     connection = sqlite3.connect(path)
     try:
         ensure_schema(connection)
-        targets_json = json.dumps(signal.targets)
-        if _signal_exists(connection, signal, targets_json):
-            return False
-
-        connection.execute(
-            """
-            INSERT INTO signals (
-                created_at, symbol, interval, direction, market_regime, close_price,
-                funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
-                entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
-                trailing_plan, pattern, setup_score, source, setup_id, setup_status, expires_at,
-                event_id, policy_version, detected_at, triggered_at, market_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                signal.created_at,
-                signal.symbol,
-                signal.interval,
-                signal.direction,
-                signal.market_regime,
-                signal.close_price,
-                signal.funding_rate,
-                signal.open_interest,
-                signal.long_short_ratio,
-                signal.spread_pct,
-                signal.entry_zone,
-                signal.stop,
-                targets_json,
-                signal.entry_low,
-                signal.entry_high,
-                signal.risk_reward,
-                signal.confidence,
-                signal.invalidation,
-                json.dumps(signal.reasons),
-                signal.trailing_plan,
-                signal.pattern,
-                signal.setup_score,
-                signal.source,
-                signal.setup_id,
-                signal.setup_status,
-                signal.expires_at,
-                signal.event_id,
-                signal.policy_version,
-                signal.detected_at,
-                signal.triggered_at,
-                signal.market_source,
-            ),
-        )
+        inserted = _save_signal_on_connection(connection, signal)
         connection.commit()
-        return True
+        return inserted
     finally:
         connection.close()
+
+
+def _save_signal_on_connection(connection: sqlite3.Connection, signal: Signal) -> bool:
+    targets_json = json.dumps(signal.targets)
+    if _signal_exists(connection, signal, targets_json):
+        return False
+
+    connection.execute(
+        """
+        INSERT INTO signals (
+            created_at, symbol, interval, direction, market_regime, close_price,
+            funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
+            entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
+            trailing_plan, pattern, setup_score, source, setup_id, setup_status, expires_at,
+            event_id, policy_version, detected_at, triggered_at, market_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signal.created_at,
+            signal.symbol,
+            signal.interval,
+            signal.direction,
+            signal.market_regime,
+            signal.close_price,
+            signal.funding_rate,
+            signal.open_interest,
+            signal.long_short_ratio,
+            signal.spread_pct,
+            signal.entry_zone,
+            signal.stop,
+            targets_json,
+            signal.entry_low,
+            signal.entry_high,
+            signal.risk_reward,
+            signal.confidence,
+            signal.invalidation,
+            json.dumps(signal.reasons),
+            signal.trailing_plan,
+            signal.pattern,
+            signal.setup_score,
+            signal.source,
+            signal.setup_id,
+            signal.setup_status,
+            signal.expires_at,
+            signal.event_id,
+            signal.policy_version,
+            signal.detected_at,
+            signal.triggered_at,
+            signal.market_source,
+        ),
+    )
+    return True
 
 
 def load_evaluable_signals(db_path: str | Path) -> list[dict[str, object]]:

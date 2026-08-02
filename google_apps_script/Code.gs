@@ -92,24 +92,35 @@ function handleJournalApi_(payload) {
     return jsonResponse_({ ok: false, error: "unauthorized" });
   }
 
-  if (payload.action === "save_signal") {
-    return jsonResponse_(saveSignal_(payload.signal));
-  }
-  if (payload.action === "load_evaluable_signals") {
-    return jsonResponse_({ ok: true, signals: loadEvaluableSignals_() });
-  }
-  if (payload.action === "update_signal_evaluation") {
-    updateSignalEvaluation_(payload);
-    return jsonResponse_({ ok: true });
-  }
-  if (payload.action === "summarize_journal") {
-    return jsonResponse_({ ok: true, summary: summarizeJournal_() });
-  }
-  if (payload.action === "save_setup_event") {
-    return jsonResponse_(saveSetupEvent_(payload.setup, payload.fingerprint));
-  }
-  if (payload.action === "load_latest_setups") {
-    return jsonResponse_({ ok: true, setups: loadLatestSetups_() });
+  try {
+    if (payload.action === "save_signal") {
+      return jsonResponse_(saveSignal_(payload.signal));
+    }
+    if (payload.action === "load_evaluable_signals") {
+      return jsonResponse_({ ok: true, signals: loadEvaluableSignals_() });
+    }
+    if (payload.action === "update_signal_evaluation") {
+      return jsonResponse_(updateSignalEvaluation_(payload));
+    }
+    if (payload.action === "summarize_journal") {
+      return jsonResponse_({ ok: true, summary: summarizeJournal_() });
+    }
+    if (payload.action === "save_setup_event") {
+      return jsonResponse_(saveSetupEvent_(payload.setup, payload.fingerprint));
+    }
+    if (payload.action === "save_triggered_event") {
+      return jsonResponse_(saveTriggeredEvent_(payload));
+    }
+    if (payload.action === "load_latest_setups") {
+      return jsonResponse_({ ok: true, setups: loadLatestSetups_() });
+    }
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    return jsonResponse_({
+      ok: false,
+      error: message,
+      retryable: message === "temporary lock timeout",
+    });
   }
   return jsonResponse_({ ok: false, error: "unknown action" });
 }
@@ -146,6 +157,10 @@ function handleTelegramWebhook_(update, e) {
 }
 
 function saveSignal_(signal) {
+  return withScriptLock_(() => saveSignalUnlocked_(signal));
+}
+
+function saveSignalUnlocked_(signal) {
   const sheet = getSignalsSheet_();
   const rows = readRows_(sheet);
   const targetsJson = JSON.stringify(signal.targets || []);
@@ -155,7 +170,7 @@ function saveSignal_(signal) {
   }
 
   const nextId = nextId_(rows);
-  sheet.appendRow([
+  appendMappedRow_(sheet, SIGNAL_COLUMNS, [
     nextId,
     signal.created_at || new Date().toISOString(),
     signal.symbol || "",
@@ -200,6 +215,26 @@ function saveSignal_(signal) {
   return { ok: true, inserted: true, id: nextId };
 }
 
+function saveTriggeredEvent_(payload) {
+  return withScriptLock_(() => {
+    const signal = payload.signal || {};
+    const setup = payload.setup || {};
+    const signalEventId = signal.event_id || signal.setup_id || "";
+    const setupEventId = setup.event_id || setup.setup_id || "";
+    if (!signalEventId || signalEventId !== setupEventId) {
+      return { ok: false, error: "triggered signal/setup event_id mismatch" };
+    }
+    const signalReceipt = saveSignalUnlocked_(signal);
+    const setupReceipt = saveSetupEventUnlocked_(setup, payload.fingerprint);
+    return {
+      ok: true,
+      signal_inserted: signalReceipt.inserted,
+      setup_inserted: setupReceipt.inserted,
+      event_id: signalEventId,
+    };
+  });
+}
+
 function loadEvaluableSignals_() {
   return readRows_(getSignalsSheet_())
     .filter((row) => ["LONG", "SHORT"].includes(row.direction))
@@ -226,32 +261,35 @@ function loadEvaluableSignals_() {
 }
 
 function updateSignalEvaluation_(payload) {
+  return withScriptLock_(() => updateSignalEvaluationUnlocked_(payload));
+}
+
+function updateSignalEvaluationUnlocked_(payload) {
   const sheet = getSignalsSheet_();
   const values = sheet.getDataRange().getValues();
-  const idColumn = SIGNAL_COLUMNS.indexOf("id");
-  const activatedAtColumn = SIGNAL_COLUMNS.indexOf("activated_at");
-  const evaluatedAtColumn = SIGNAL_COLUMNS.indexOf("evaluated_at");
-  const outcomeColumn = SIGNAL_COLUMNS.indexOf("outcome");
-  const maxFavorableColumn = SIGNAL_COLUMNS.indexOf("max_favorable_price");
-  const maxAdverseColumn = SIGNAL_COLUMNS.indexOf("max_adverse_price");
-  const resultRColumn = SIGNAL_COLUMNS.indexOf("result_R");
-  const baselineRColumn = SIGNAL_COLUMNS.indexOf("baseline_R");
-  const edgeRColumn = SIGNAL_COLUMNS.indexOf("edge_R");
+  const headers = values[0].map((value) => String(value).trim());
+  const idColumn = requiredColumnIndex_(headers, "id");
+  const updates = {
+    activated_at: payload.activated_at || "",
+    evaluated_at: payload.evaluated_at || new Date().toISOString(),
+    outcome: payload.outcome || "",
+    max_favorable_price: nullable_(payload.max_favorable_price),
+    max_adverse_price: nullable_(payload.max_adverse_price),
+    result_R: nullable_(payload.result_R),
+    baseline_R: nullable_(payload.baseline_R),
+    edge_R: nullable_(payload.edge_R),
+  };
 
   for (let index = 1; index < values.length; index += 1) {
     if (Number(values[index][idColumn]) === Number(payload.signal_id)) {
       const rowNumber = index + 1;
-      sheet.getRange(rowNumber, activatedAtColumn + 1).setValue(payload.activated_at || "");
-      sheet.getRange(rowNumber, evaluatedAtColumn + 1).setValue(payload.evaluated_at || new Date().toISOString());
-      sheet.getRange(rowNumber, outcomeColumn + 1).setValue(payload.outcome || "");
-      sheet.getRange(rowNumber, maxFavorableColumn + 1).setValue(nullable_(payload.max_favorable_price));
-      sheet.getRange(rowNumber, maxAdverseColumn + 1).setValue(nullable_(payload.max_adverse_price));
-      sheet.getRange(rowNumber, resultRColumn + 1).setValue(nullable_(payload.result_R));
-      sheet.getRange(rowNumber, baselineRColumn + 1).setValue(nullable_(payload.baseline_R));
-      sheet.getRange(rowNumber, edgeRColumn + 1).setValue(nullable_(payload.edge_R));
-      return;
+      Object.keys(updates).forEach((column) => {
+        sheet.getRange(rowNumber, requiredColumnIndex_(headers, column) + 1).setValue(updates[column]);
+      });
+      return { ok: true, updated: true, id: Number(payload.signal_id) };
     }
   }
+  return { ok: false, updated: false, error: "signal id not found" };
 }
 
 function summarizeJournal_() {
@@ -461,7 +499,7 @@ function getSignalsSheet_() {
   if (!sheet) {
     sheet = spreadsheet.insertSheet(SIGNALS_SHEET_NAME);
   }
-  const headers = sheet.getRange(1, 1, 1, SIGNAL_COLUMNS.length).getValues()[0];
+  const headers = readHeaders_(sheet, SIGNAL_COLUMNS.length);
   if (headers.join("") === "") {
     sheet.getRange(1, 1, 1, SIGNAL_COLUMNS.length).setValues([SIGNAL_COLUMNS]);
   } else {
@@ -477,7 +515,7 @@ function getSetupsSheet_() {
   if (!sheet) {
     sheet = spreadsheet.insertSheet(SETUPS_SHEET_NAME);
   }
-  const headers = sheet.getRange(1, 1, 1, SETUP_COLUMNS.length).getValues()[0];
+  const headers = readHeaders_(sheet, SETUP_COLUMNS.length);
   if (headers.join("") === "") {
     sheet.getRange(1, 1, 1, SETUP_COLUMNS.length).setValues([SETUP_COLUMNS]);
   } else {
@@ -491,30 +529,75 @@ function ensureSignalColumns_(sheet, headers) {
 }
 
 function ensureColumns_(sheet, headers, expectedColumns) {
-  const existing = headers.map((value) => String(value)).filter((value) => value);
+  const normalized = headers.map((value) => String(value));
+  const duplicateRequired = expectedColumns.filter(
+    (column) => normalized.indexOf(column) !== normalized.lastIndexOf(column)
+  );
+  if (duplicateRequired.length) {
+    throw new Error(`duplicate required columns: ${duplicateRequired.join(", ")}`);
+  }
+  const existing = normalized.filter((value) => value);
   const missing = expectedColumns.filter((column) => !existing.includes(column));
   if (!missing.length) {
     return;
   }
-  const startColumn = existing.length + 1;
+  let lastNamedColumn = 0;
+  normalized.forEach((value, index) => {
+    if (value) {
+      lastNamedColumn = index + 1;
+    }
+  });
+  const startColumn = lastNamedColumn + 1;
   sheet.getRange(1, startColumn, 1, missing.length).setValues([missing]);
 }
 
+function readHeaders_(sheet, minimumColumns) {
+  const width = Math.max(Number(sheet.getLastColumn()) || 0, minimumColumns || 1);
+  return sheet.getRange(1, 1, 1, width).getValues()[0].map((value) => String(value).trim());
+}
+
+function appendMappedRow_(sheet, expectedColumns, values) {
+  if (expectedColumns.length !== values.length) {
+    throw new Error("column/value count mismatch");
+  }
+  const headers = readHeaders_(sheet, expectedColumns.length);
+  const byColumn = {};
+  expectedColumns.forEach((column, index) => {
+    byColumn[column] = values[index];
+  });
+  const row = headers.map((header) => (
+    Object.prototype.hasOwnProperty.call(byColumn, header) ? byColumn[header] : ""
+  ));
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
+}
+
+function requiredColumnIndex_(headers, column) {
+  const index = headers.indexOf(column);
+  if (index < 0) {
+    throw new Error(`missing required column: ${column}`);
+  }
+  return index;
+}
+
 function saveSetupEvent_(setup, fingerprint) {
+  return withScriptLock_(() => saveSetupEventUnlocked_(setup, fingerprint));
+}
+
+function saveSetupEventUnlocked_(setup, fingerprint) {
   const sheet = getSetupsSheet_();
   const rows = readRows_(sheet);
   const eventId = setup.event_id || setup.setup_id || "";
   const sameSetupRows = rows.filter(
     (row) => String(row.event_id || row.setup_id || "") === String(eventId)
   );
-  const latest = sameSetupRows.length ? sameSetupRows[sameSetupRows.length - 1] : null;
-  const exists = latest &&
-    String(latest.status) === String(setup.status || "") &&
-    String(latest.fingerprint) === String(fingerprint || "");
+  const exists = sameSetupRows.some(
+    (row) => String(row.status) === String(setup.status || "") &&
+      String(row.fingerprint) === String(fingerprint || "")
+  );
   if (exists) {
     return { ok: true, inserted: false };
   }
-  sheet.appendRow([
+  appendMappedRow_(sheet, SETUP_COLUMNS, [
     setup.setup_id || "",
     setup.symbol || "",
     setup.pattern || "",
@@ -597,11 +680,17 @@ function readRows_(sheet) {
   if (values.length <= 1) {
     return [];
   }
-  const headers = values[0].map((value) => String(value));
+  const headers = values[0].map((value) => String(value).trim());
+  const namedHeaders = headers.filter((header) => header);
+  if (new Set(namedHeaders).size !== namedHeaders.length) {
+    throw new Error("duplicate sheet headers");
+  }
   return values.slice(1).filter((row) => row.join("") !== "").map((row) => {
     const item = {};
     headers.forEach((header, index) => {
-      item[header] = row[index];
+      if (header) {
+        item[header] = row[index];
+      }
     });
     return item;
   });
@@ -663,6 +752,18 @@ function parsePayload_(e) {
 
 function getProperty_(name) {
   return PropertiesService.getScriptProperties().getProperty(name) || "";
+}
+
+function withScriptLock_(operation) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(25000)) {
+    throw new Error("temporary lock timeout");
+  }
+  try {
+    return operation();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function nullable_(value) {

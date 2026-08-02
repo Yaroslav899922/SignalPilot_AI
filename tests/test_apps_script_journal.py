@@ -2,6 +2,7 @@ import json
 import os
 import unittest
 from dataclasses import replace
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from signalpilot import apps_script_journal
@@ -90,7 +91,7 @@ class AppsScriptJournalTests(unittest.TestCase):
         with patch.dict(os.environ, _env(), clear=True):
             with patch(
                 "signalpilot.apps_script_journal.urlopen",
-                return_value=FakeResponse({"ok": True}),
+                return_value=FakeResponse({"ok": True, "updated": True}),
             ) as urlopen:
                 apps_script_journal.update_signal_evaluation(
                     db_path="ignored",
@@ -144,6 +145,38 @@ class AppsScriptJournalTests(unittest.TestCase):
         self.assertEqual(payload["setup"]["status"], "ARMED")
         self.assertEqual(payload["fingerprint"], setup.fingerprint)
 
+    def test_save_triggered_event_requires_both_write_receipts(self):
+        setup = replace(_setup(), status="TRIGGERED", triggered_at=_setup().created_at)
+        signal = replace(
+            _signal(),
+            source="actionable_alert",
+            setup_id=setup.setup_id,
+            event_id=setup.event_id,
+        )
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse(
+                    {"ok": True, "signal_inserted": True, "setup_inserted": True}
+                ),
+            ) as urlopen:
+                receipt = apps_script_journal.save_triggered_event(setup, signal)
+
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(receipt, (True, True))
+        self.assertEqual(payload["action"], "save_triggered_event")
+        self.assertEqual(payload["signal"]["event_id"], setup.event_id)
+        self.assertEqual(payload["setup"]["event_id"], setup.event_id)
+        self.assertEqual(payload["fingerprint"], setup.fingerprint)
+
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "signal_inserted": True}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "setup_inserted"):
+                    apps_script_journal.save_triggered_event(setup, signal)
+
     def test_load_latest_setups_decodes_rows(self):
         setup = _setup()
         with patch.dict(os.environ, _env(), clear=True):
@@ -171,6 +204,99 @@ class AppsScriptJournalTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "unauthorized"):
                     apps_script_journal.summarize_journal()
+
+    def test_missing_or_non_boolean_ok_is_rejected(self):
+        for payload in ({"summary": {}}, {"ok": None}, {"ok": 1}):
+            with self.subTest(payload=payload):
+                with patch.dict(os.environ, _env(), clear=True):
+                    with patch(
+                        "signalpilot.apps_script_journal.urlopen",
+                        return_value=FakeResponse(payload),
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "ok=true"):
+                            apps_script_journal.summarize_journal()
+
+    def test_save_requires_boolean_inserted_receipt(self):
+        for payload in ({"ok": True}, {"ok": True, "inserted": "yes"}):
+            with self.subTest(payload=payload):
+                with patch.dict(os.environ, _env(), clear=True):
+                    with patch(
+                        "signalpilot.apps_script_journal.urlopen",
+                        return_value=FakeResponse(payload),
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "inserted"):
+                            apps_script_journal.save_signal(_signal())
+
+    def test_update_requires_updated_receipt(self):
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "updated"):
+                    apps_script_journal.update_signal_evaluation(
+                        "ignored", 99, "target_hit", 110.0, 99.0
+                    )
+
+    def test_wrong_collection_type_is_rejected(self):
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "signals": {}}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "signals"):
+                    apps_script_journal.load_evaluable_signals()
+
+    def test_transient_network_failure_is_retried(self):
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                side_effect=[
+                    URLError("temporary"),
+                    FakeResponse({"ok": True, "summary": {"signals": 0}}),
+                ],
+            ) as urlopen:
+                with patch("signalpilot.apps_script_journal.time.sleep") as sleep:
+                    summary = apps_script_journal.summarize_journal()
+
+        self.assertEqual(summary, {"signals": 0})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_non_retryable_http_error_fails_once(self):
+        error = HTTPError(
+            "https://script.google.test/exec",
+            401,
+            "unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                side_effect=error,
+            ) as urlopen:
+                with patch("signalpilot.apps_script_journal.time.sleep") as sleep:
+                    with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                        apps_script_journal.summarize_journal()
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retryable_api_receipt_is_retried(self):
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                side_effect=[
+                    FakeResponse({"ok": False, "retryable": True, "error": "lock timeout"}),
+                    FakeResponse({"ok": True, "summary": {"signals": 0}}),
+                ],
+            ) as urlopen:
+                with patch("signalpilot.apps_script_journal.time.sleep"):
+                    summary = apps_script_journal.summarize_journal()
+
+        self.assertEqual(summary, {"signals": 0})
+        self.assertEqual(urlopen.call_count, 2)
 
 
 def _env() -> dict[str, str]:

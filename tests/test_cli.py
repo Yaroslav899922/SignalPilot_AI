@@ -255,7 +255,10 @@ class CliTests(unittest.TestCase):
                         with patch("signalpilot.cli.reconcile_setup_state", return_value=[event]):
                             with patch("signalpilot.cli.save_setup_event", return_value=True):
                                 with patch("signalpilot.cli.setup_to_signal", return_value=signal):
-                                    with patch("signalpilot.cli.save_signal", return_value=True):
+                                    with patch(
+                                        "signalpilot.cli.save_triggered_event",
+                                        return_value=(True, True),
+                                    ):
                                         with patch("signalpilot.cli.format_setup_message", return_value="<b>entry</b>"):
                                             with patch("signalpilot.telegram.send_message", return_value={"ok": True}) as send:
                                                 with redirect_stdout(output):
@@ -271,11 +274,99 @@ class CliTests(unittest.TestCase):
             {
                 "setup_check": "completed",
                 "symbols": ["BTCUSDT"],
+                "checked_symbols": ["BTCUSDT"],
+                "failed_symbols": [],
                 "state_changes": 1,
                 "paper_entries": 1,
                 "messages_sent": 1,
             },
         )
+
+    def test_setup_check_does_not_commit_trigger_when_paper_entry_write_fails(self):
+        output = io.StringIO()
+        event = SimpleNamespace(status="TRIGGERED")
+        operations = []
+
+        def fail_bundle(*args, **kwargs):
+            operations.append("bundle")
+            raise RuntimeError("journal unavailable")
+
+        with patch("signalpilot.cli.load_live_market_data", return_value={"symbol": "BTCUSDT"}):
+            with patch("signalpilot.cli.load_latest_setups", return_value=[]):
+                with patch("signalpilot.cli.analyze_actionable_setup", return_value=event):
+                    with patch("signalpilot.cli.reconcile_setup_state", return_value=[event]):
+                        with patch("signalpilot.cli.should_notify_setup_event", return_value=False):
+                            with patch("signalpilot.cli.setup_to_signal", return_value=SimpleNamespace()):
+                                with patch(
+                                    "signalpilot.cli.save_triggered_event",
+                                    side_effect=fail_bundle,
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = main(["--setup-check", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(operations, ["bundle"])
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["setup_check"], "degraded")
+        self.assertEqual(status["checked_symbols"], [])
+        self.assertEqual(status["failed_symbols"], ["BTCUSDT"])
+        self.assertEqual(status["state_changes"], 0)
+        self.assertEqual(status["paper_entries"], 0)
+
+    def test_setup_check_commits_trigger_when_paper_entry_is_already_durable(self):
+        output = io.StringIO()
+        event = SimpleNamespace(status="TRIGGERED")
+        operations = []
+
+        def save_bundle(*args, **kwargs):
+            operations.append("bundle")
+            return False, True
+
+        with patch("signalpilot.cli.load_live_market_data", return_value={"symbol": "BTCUSDT"}):
+            with patch("signalpilot.cli.load_latest_setups", return_value=[]):
+                with patch("signalpilot.cli.analyze_actionable_setup", return_value=event):
+                    with patch("signalpilot.cli.reconcile_setup_state", return_value=[event]):
+                        with patch("signalpilot.cli.should_notify_setup_event", return_value=False):
+                            with patch("signalpilot.cli.setup_to_signal", return_value=SimpleNamespace()):
+                                with patch(
+                                    "signalpilot.cli.save_triggered_event",
+                                    side_effect=save_bundle,
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = main(["--setup-check", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(operations, ["bundle"])
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["setup_check"], "completed")
+        self.assertEqual(status["state_changes"], 1)
+        self.assertEqual(status["paper_entries"], 0)
+
+    def test_setup_check_preserves_successful_symbols_when_one_symbol_fails(self):
+        output = io.StringIO()
+        event = SimpleNamespace(status="ARMED")
+
+        def load_market(symbol, intervals, limit):
+            if symbol == "BTCUSDT":
+                raise RuntimeError("market unavailable")
+            return {"symbol": symbol}
+
+        with patch("signalpilot.cli.load_live_market_data", side_effect=load_market):
+            with patch("signalpilot.cli.load_latest_setups", return_value=[]):
+                with patch("signalpilot.cli.analyze_actionable_setup", return_value=event):
+                    with patch("signalpilot.cli.reconcile_setup_state", return_value=[event]):
+                        with patch("signalpilot.cli.should_notify_setup_event", return_value=False):
+                            with patch("signalpilot.cli.save_setup_event", return_value=True):
+                                with redirect_stdout(output):
+                                    exit_code = main(
+                                        ["--setup-check", "--symbols", "BTCUSDT", "ETHUSDT"]
+                                    )
+
+        self.assertEqual(exit_code, 1)
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["checked_symbols"], ["ETHUSDT"])
+        self.assertEqual(status["failed_symbols"], ["BTCUSDT"])
+        self.assertEqual(status["state_changes"], 1)
 
     def test_move_alert_with_notify_sends_triggered_alerts(self):
         output = io.StringIO()

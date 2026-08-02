@@ -22,7 +22,7 @@ from .live_analyst import analyze_live_market, format_market_status
 from .market_data import load_live_market_data
 from .paper import evaluate_journal
 from .signals import DEFAULT_TIMEFRAMES, Signal
-from .setup_backend import load_latest_setups, save_setup_event
+from .setup_backend import load_latest_setups, save_setup_event, save_triggered_event
 from .telegram import TELEGRAM_API_BASE_URL, TelegramConfig, send_signal
 from .telegram_bot import run_telegram_bot
 from .tradingview import TradingViewTrigger, parse_tradingview_trigger
@@ -104,8 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.setup_check:
-        _run_setup_check(args, journal_path, telegram_config)
-        return 0
+        return _run_setup_check(args, journal_path, telegram_config)
 
     if args.move_alert:
         _run_move_alert(args, telegram_config)
@@ -161,46 +160,69 @@ def _run_setup_check(
     args: argparse.Namespace,
     journal_path: Path,
     telegram_config: TelegramConfig | None,
-) -> None:
-    markets = [
-        load_live_market_data(symbol=symbol, intervals=args.intervals, limit=args.limit)
-        for symbol in args.symbols
-    ]
+) -> int:
     now = datetime.now(timezone.utc)
     previous = load_latest_setups(journal_path)
     emitted = 0
     sent = 0
     paper_entries = 0
+    checked_symbols: list[str] = []
+    failed_symbols: list[str] = []
+    failures: list[dict[str, str]] = []
 
-    for market in markets:
-        candidate = analyze_actionable_setup(market, now_utc=now)
-        events = reconcile_setup_state(candidate, previous, market, now_utc=now)
-        for event in events:
-            notify_event = should_notify_setup_event(event, previous)
-            if not save_setup_event(event, journal_path):
-                continue
-            emitted += 1
-            previous.append(event)
-            if event.status == TRIGGERED and save_signal(setup_to_signal(event), journal_path):
-                paper_entries += 1
-            if telegram_config is not None and notify_event:
-                from .telegram import send_message
+    for symbol in args.symbols:
+        try:
+            market = load_live_market_data(
+                symbol=symbol,
+                intervals=args.intervals,
+                limit=args.limit,
+            )
+            candidate = analyze_actionable_setup(market, now_utc=now)
+            events = reconcile_setup_state(candidate, previous, market, now_utc=now)
+            for event in events:
+                notify_event = should_notify_setup_event(event, previous)
+                if event.status == TRIGGERED:
+                    signal_inserted, setup_inserted = save_triggered_event(
+                        event,
+                        setup_to_signal(event),
+                        journal_path,
+                    )
+                    if signal_inserted:
+                        paper_entries += 1
+                else:
+                    setup_inserted = save_setup_event(event, journal_path)
+                if not setup_inserted:
+                    continue
+                emitted += 1
+                previous.append(event)
+                if telegram_config is not None and notify_event:
+                    from .telegram import send_message
 
-                send_message(format_setup_message(event), telegram_config)
-                sent += 1
+                    send_message(format_setup_message(event), telegram_config)
+                    sent += 1
+            checked_symbols.append(symbol)
+        except Exception as error:
+            failed_symbols.append(symbol)
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
 
-    print(
-        json.dumps(
-            {
-                "setup_check": "completed",
-                "symbols": list(args.symbols),
-                "state_changes": emitted,
-                "paper_entries": paper_entries,
-                "messages_sent": sent,
-            },
-            ensure_ascii=False,
-        )
-    )
+    result: dict[str, object] = {
+        "setup_check": "degraded" if failed_symbols else "completed",
+        "symbols": list(args.symbols),
+        "checked_symbols": checked_symbols,
+        "failed_symbols": failed_symbols,
+        "state_changes": emitted,
+        "paper_entries": paper_entries,
+        "messages_sent": sent,
+    }
+    if failures:
+        result["failures"] = failures
+    print(json.dumps(result, ensure_ascii=False))
+    return 1 if failed_symbols else 0
 
 
 def _run_move_alert(args: argparse.Namespace, telegram_config: TelegramConfig | None) -> None:
