@@ -25,8 +25,9 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 created_at, symbol, interval, direction, market_regime, close_price,
                 funding_rate, open_interest, long_short_ratio, spread_pct, entry_zone, stop, targets_json,
                 entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
-                trailing_plan, pattern, setup_score, source, setup_id, setup_status, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trailing_plan, pattern, setup_score, source, setup_id, setup_status, expires_at,
+                event_id, policy_version, detected_at, triggered_at, market_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal.created_at,
@@ -55,6 +56,11 @@ def save_signal(signal: Signal, db_path: str | Path) -> bool:
                 signal.setup_id,
                 signal.setup_status,
                 signal.expires_at,
+                signal.event_id,
+                signal.policy_version,
+                signal.detected_at,
+                signal.triggered_at,
+                signal.market_source,
             ),
         )
         connection.commit()
@@ -75,7 +81,8 @@ def load_evaluable_signals(db_path: str | Path) -> list[dict[str, object]]:
         rows = connection.execute(
             """
             SELECT id, created_at, symbol, interval, direction, close_price, entry_low, entry_high,
-                   stop, targets_json, source
+                   stop, targets_json, source, expires_at, event_id, policy_version,
+                   detected_at, triggered_at, market_source
             FROM signals
             WHERE direction IN ('LONG', 'SHORT')
               AND (outcome IS NULL OR outcome = 'not_enough_data')
@@ -103,7 +110,8 @@ def load_signal_rows(db_path: str | Path, limit: int = 500) -> list[dict[str, ob
                    targets_json, entry_low, entry_high, risk_reward, confidence, invalidation, reasons_json,
                    activated_at, evaluated_at, outcome, max_favorable_price, max_adverse_price,
                    trailing_plan, pattern, setup_score, source,
-                   result_R, baseline_R, edge_R, setup_id, setup_status, expires_at
+                   result_R, baseline_R, edge_R, setup_id, setup_status, expires_at,
+                   event_id, policy_version, detected_at, triggered_at, market_source
             FROM signals
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -271,7 +279,12 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             edge_R REAL,
             setup_id TEXT NOT NULL DEFAULT '',
             setup_status TEXT NOT NULL DEFAULT '',
-            expires_at TEXT NOT NULL DEFAULT ''
+            expires_at TEXT NOT NULL DEFAULT '',
+            event_id TEXT NOT NULL DEFAULT '',
+            policy_version TEXT NOT NULL DEFAULT 'legacy_unversioned',
+            detected_at TEXT NOT NULL DEFAULT '',
+            triggered_at TEXT NOT NULL DEFAULT '',
+            market_source TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -307,6 +320,11 @@ _ADDED_COLUMNS = {
     "setup_id": "setup_id TEXT NOT NULL DEFAULT ''",
     "setup_status": "setup_status TEXT NOT NULL DEFAULT ''",
     "expires_at": "expires_at TEXT NOT NULL DEFAULT ''",
+    "event_id": "event_id TEXT NOT NULL DEFAULT ''",
+    "policy_version": "policy_version TEXT NOT NULL DEFAULT 'legacy_unversioned'",
+    "detected_at": "detected_at TEXT NOT NULL DEFAULT ''",
+    "triggered_at": "triggered_at TEXT NOT NULL DEFAULT ''",
+    "market_source": "market_source TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -318,6 +336,12 @@ def _decode_signal_row(row: sqlite3.Row) -> dict[str, object]:
 
 
 def _signal_exists(connection: sqlite3.Connection, signal: Signal, targets_json: str) -> bool:
+    if signal.event_id:
+        row = connection.execute(
+            "SELECT 1 FROM signals WHERE event_id = ? LIMIT 1",
+            (signal.event_id,),
+        ).fetchone()
+        return row is not None
     if signal.setup_id:
         row = connection.execute(
             "SELECT 1 FROM signals WHERE setup_id = ? LIMIT 1",

@@ -107,6 +107,29 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(rows[0]["entry_high"], 101.0)
         self.assertEqual(rows[0]["source"], "market_brief")
 
+    def test_saves_actionable_measurement_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            signal = replace(
+                _signal(direction="LONG", created_at="2026-07-19T18:00:00+00:00"),
+                source="actionable_alert",
+                setup_id="BTCUSDT-breakout-retest-level",
+                event_id="BTCUSDT-breakout-retest-event-1",
+                policy_version="v3.1",
+                detected_at="2026-07-19T17:00:00+00:00",
+                triggered_at="2026-07-19T18:00:00+00:00",
+                market_source="binance_usdm_public",
+            )
+
+            save_signal(signal, db_path)
+            rows = load_signal_rows(db_path)
+
+        self.assertEqual(rows[0].get("event_id"), signal.event_id)
+        self.assertEqual(rows[0].get("policy_version"), "v3.1")
+        self.assertEqual(rows[0].get("detected_at"), signal.detected_at)
+        self.assertEqual(rows[0].get("triggered_at"), signal.triggered_at)
+        self.assertEqual(rows[0].get("market_source"), signal.market_source)
+
     def test_save_signal_skips_duplicate_market_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "signals.sqlite3"
@@ -122,6 +145,33 @@ class JournalTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 2)
         self.assertEqual([row["close_price"] for row in rows], [101.0, 100.0])
+
+    def test_actionable_dedupe_uses_event_id_instead_of_permanent_setup_level(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            first = replace(
+                _signal(direction="LONG", created_at="2026-07-19T18:00:00+00:00"),
+                source="actionable_alert",
+                setup_id="BTCUSDT-breakout-retest-level",
+                event_id="BTCUSDT-breakout-retest-event-1",
+            )
+            second = replace(
+                first,
+                created_at="2026-07-20T18:00:00+00:00",
+                event_id="BTCUSDT-breakout-retest-event-2",
+            )
+            duplicate_second = replace(second, created_at="2026-07-20T18:15:00+00:00")
+
+            self.assertTrue(save_signal(first, db_path))
+            self.assertTrue(save_signal(second, db_path))
+            self.assertFalse(save_signal(duplicate_second, db_path))
+            rows = load_signal_rows(db_path)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row["event_id"] for row in rows},
+            {first.event_id, second.event_id},
+        )
 
     def test_summarize_journal_returns_empty_summary_for_missing_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

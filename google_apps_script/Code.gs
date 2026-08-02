@@ -36,6 +36,11 @@ const SIGNAL_COLUMNS = [
   "setup_id",
   "setup_status",
   "expires_at",
+  "event_id",
+  "policy_version",
+  "detected_at",
+  "triggered_at",
+  "market_source",
 ];
 const SETUP_COLUMNS = [
   "setup_id",
@@ -60,6 +65,15 @@ const SETUP_COLUMNS = [
   "expires_at",
   "source",
   "fingerprint",
+  "event_id",
+  "policy_version",
+  "detected_at",
+  "triggered_at",
+  "market_source",
+  "funding_rate",
+  "open_interest",
+  "long_short_ratio",
+  "spread_pct",
 ];
 
 function doPost(e) {
@@ -177,6 +191,11 @@ function saveSignal_(signal) {
     signal.setup_id || "",
     signal.setup_status || "",
     signal.expires_at || "",
+    signal.event_id || "",
+    signal.policy_version || "legacy_unversioned",
+    signal.detected_at || "",
+    signal.triggered_at || "",
+    signal.market_source || "",
   ]);
   return { ok: true, inserted: true, id: nextId };
 }
@@ -197,6 +216,12 @@ function loadEvaluableSignals_() {
       stop: numberOrNull_(row.stop),
       targets_json: row.targets_json || "[]",
       source: row.source || "",
+      expires_at: row.expires_at || "",
+      event_id: row.event_id || row.setup_id || "",
+      policy_version: row.policy_version || "legacy_unversioned",
+      detected_at: row.detected_at || row.created_at || "",
+      triggered_at: row.triggered_at || "",
+      market_source: row.market_source || "",
     }));
 }
 
@@ -452,8 +477,9 @@ function ensureColumns_(sheet, headers, expectedColumns) {
 function saveSetupEvent_(setup, fingerprint) {
   const sheet = getSetupsSheet_();
   const rows = readRows_(sheet);
+  const eventId = setup.event_id || setup.setup_id || "";
   const sameSetupRows = rows.filter(
-    (row) => String(row.setup_id) === String(setup.setup_id || "")
+    (row) => String(row.event_id || row.setup_id || "") === String(eventId)
   );
   const latest = sameSetupRows.length ? sameSetupRows[sameSetupRows.length - 1] : null;
   const exists = latest &&
@@ -485,6 +511,15 @@ function saveSetupEvent_(setup, fingerprint) {
     setup.expires_at || "",
     setup.source || "actionable_setup",
     fingerprint || "",
+    eventId,
+    setup.policy_version || "legacy_unversioned",
+    setup.detected_at || setup.created_at || "",
+    setup.triggered_at || "",
+    setup.market_source || "",
+    nullable_(setup.funding_rate),
+    nullable_(setup.open_interest),
+    nullable_(setup.long_short_ratio),
+    nullable_(setup.spread_pct),
   ]);
   return { ok: true, inserted: true };
 }
@@ -492,7 +527,7 @@ function saveSetupEvent_(setup, fingerprint) {
 function loadLatestSetups_() {
   const latest = {};
   readRows_(getSetupsSheet_()).forEach((row) => {
-    latest[String(row.setup_id)] = row;
+    latest[String(row.event_id || row.setup_id)] = row;
   });
   return Object.keys(latest).map((setupId) => {
     const row = latest[setupId];
@@ -518,6 +553,15 @@ function loadLatestSetups_() {
       created_at: row.created_at || "",
       expires_at: row.expires_at || "",
       source: row.source || "actionable_setup",
+      event_id: row.event_id || row.setup_id || "",
+      policy_version: row.policy_version || "legacy_unversioned",
+      detected_at: row.detected_at || row.created_at || "",
+      triggered_at: row.triggered_at || "",
+      market_source: row.market_source || "",
+      funding_rate: numberOrNull_(row.funding_rate),
+      open_interest: numberOrNull_(row.open_interest),
+      long_short_ratio: numberOrNull_(row.long_short_ratio),
+      spread_pct: numberOrNull_(row.spread_pct),
     };
   });
 }
@@ -538,6 +582,9 @@ function readRows_(sheet) {
 }
 
 function signalExists_(rows, signal, targetsJson) {
+  if (signal.event_id) {
+    return rows.some((row) => String(row.event_id || "") === String(signal.event_id));
+  }
   if (signal.setup_id) {
     return rows.some((row) => String(row.setup_id || "") === String(signal.setup_id));
   }

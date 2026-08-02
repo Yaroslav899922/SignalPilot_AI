@@ -18,6 +18,9 @@ TARGET_HIT = "TARGET_HIT"
 STOPPED = "STOPPED"
 EXPIRED = "EXPIRED"
 TIMED_OUT = "TIMED_OUT"
+ACTIONABLE_POLICY_VERSION = "v3.1"
+LEGACY_POLICY_VERSION = "legacy_unversioned"
+EVENT_REARM_COOLDOWN = timedelta(hours=12)
 
 ACTIVE_STATUSES = (WATCH, ARMED, TRIGGERED)
 TERMINAL_STATUSES = (INVALIDATED, TARGET_HIT, STOPPED, EXPIRED, TIMED_OUT)
@@ -68,6 +71,15 @@ class ActionableSetup:
     created_at: str
     expires_at: str
     source: str = "actionable_setup"
+    event_id: str = ""
+    policy_version: str = ACTIONABLE_POLICY_VERSION
+    detected_at: str = ""
+    triggered_at: str = ""
+    market_source: str = ""
+    funding_rate: float | None = None
+    open_interest: float | None = None
+    long_short_ratio: float | None = None
+    spread_pct: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -79,8 +91,10 @@ class ActionableSetup:
     def from_dict(cls, data: dict[str, object]) -> "ActionableSetup":
         raw_targets = data.get("targets", ())
         raw_conditions = data.get("conditions", ())
+        setup_id = str(data.get("setup_id", ""))
+        created_at = str(data.get("created_at", ""))
         return cls(
-            setup_id=str(data.get("setup_id", "")),
+            setup_id=setup_id,
             symbol=str(data.get("symbol", "")),
             pattern=str(data.get("pattern", "")),
             direction=str(data.get("direction", "")),
@@ -102,9 +116,18 @@ class ActionableSetup:
                 for value in raw_conditions
                 if isinstance(value, dict)
             ),
-            created_at=str(data.get("created_at", "")),
+            created_at=created_at,
             expires_at=str(data.get("expires_at", "")),
             source=str(data.get("source", "actionable_setup")),
+            event_id=str(data.get("event_id") or setup_id),
+            policy_version=str(data.get("policy_version") or LEGACY_POLICY_VERSION),
+            detected_at=str(data.get("detected_at") or created_at),
+            triggered_at=str(data.get("triggered_at") or ""),
+            market_source=str(data.get("market_source") or ""),
+            funding_rate=_optional_float(data.get("funding_rate")),
+            open_interest=_optional_float(data.get("open_interest")),
+            long_short_ratio=_optional_float(data.get("long_short_ratio")),
+            spread_pct=_optional_float(data.get("spread_pct")),
         )
 
     def with_status(self, status: str, *, action: str, reason: str, now_utc: datetime) -> "ActionableSetup":
@@ -120,7 +143,7 @@ class ActionableSetup:
     def fingerprint(self) -> str:
         condition_bits = "".join("1" if condition.met else "0" for condition in self.conditions)
         payload = (
-            f"{self.setup_id}|{self.status}|{_price(self.entry_low)}|{_price(self.entry_high)}|"
+            f"{self.event_id}|{self.setup_id}|{self.status}|{_price(self.entry_low)}|{_price(self.entry_high)}|"
             f"{_price(self.stop)}|{','.join(_price(value) for value in self.targets)}|{condition_bits}"
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
@@ -200,17 +223,24 @@ def reconcile_setup_state(
     if previous is None:
         return [] if candidate is None else [candidate]
 
-    # A confirmed entry is one paper trade.  If the same level/pattern later
-    # appears again, do not resurrect it and count/announce a second entry.
-    if candidate is not None and any(
-        setup.setup_id == candidate.setup_id
-        and setup.status in {TRIGGERED, TARGET_HIT, STOPPED, EXPIRED, TIMED_OUT}
-        for setup in symbol_history
-    ):
-        candidate = None
+    if candidate is not None and previous.status in ACTIVE_STATUSES:
+        candidate = _continue_event(candidate, previous, now)
+
+    if candidate is not None:
+        latest_terminal = max(
+            (
+                setup
+                for setup in symbol_history
+                if setup.setup_id == candidate.setup_id and setup.status in TERMINAL_STATUSES
+            ),
+            key=lambda item: item.created_at,
+            default=None,
+        )
+        if latest_terminal is not None and _within_rearm_cooldown(latest_terminal, now):
+            candidate = None
 
     if previous.status in TERMINAL_STATUSES:
-        if candidate is None or candidate.setup_id == previous.setup_id:
+        if candidate is None or candidate.event_id == previous.event_id:
             return []
         return [candidate]
 
@@ -249,7 +279,7 @@ def reconcile_setup_state(
             )
         ]
 
-    if candidate.setup_id == previous.setup_id:
+    if candidate.event_id == previous.event_id:
         return [] if candidate.status == previous.status else [candidate]
 
     cancelled = previous.with_status(
@@ -282,6 +312,31 @@ def should_notify_setup_event(
     )
 
 
+def _continue_event(
+    candidate: ActionableSetup,
+    previous: ActionableSetup,
+    now: datetime,
+) -> ActionableSetup:
+    if candidate.setup_id != previous.setup_id:
+        return candidate
+    newly_triggered = candidate.status == TRIGGERED and previous.status != TRIGGERED
+    return replace(
+        candidate,
+        event_id=previous.event_id or previous.setup_id,
+        detected_at=previous.detected_at or previous.created_at,
+        triggered_at=_iso(now) if newly_triggered else previous.triggered_at,
+        expires_at=_iso(now + timedelta(hours=12)) if newly_triggered else previous.expires_at,
+    )
+
+
+def _within_rearm_cooldown(setup: ActionableSetup, now: datetime) -> bool:
+    try:
+        terminal_at = datetime.fromisoformat(setup.created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return _aware(terminal_at) + EVENT_REARM_COOLDOWN > now
+
+
 def setup_to_signal(setup: ActionableSetup):
     from .signals import Signal
 
@@ -291,10 +346,10 @@ def setup_to_signal(setup: ActionableSetup):
         direction=setup.direction,
         market_regime=setup.regime,
         close_price=setup.current_price,
-        funding_rate=None,
-        open_interest=None,
-        long_short_ratio=None,
-        spread_pct=None,
+        funding_rate=setup.funding_rate,
+        open_interest=setup.open_interest,
+        long_short_ratio=setup.long_short_ratio,
+        spread_pct=setup.spread_pct,
         entry_zone=f"{_price(setup.entry_low)}-{_price(setup.entry_high)}",
         stop=setup.stop,
         targets=setup.targets,
@@ -312,6 +367,11 @@ def setup_to_signal(setup: ActionableSetup):
         setup_id=setup.setup_id,
         setup_status=setup.status,
         expires_at=setup.expires_at,
+        event_id=setup.event_id,
+        policy_version=setup.policy_version,
+        detected_at=setup.detected_at,
+        triggered_at=setup.triggered_at,
+        market_source=setup.market_source,
     )
 
 
@@ -863,6 +923,7 @@ def _make_setup(
     score = round(50.0 + met_ratio * 40.0 + (5.0 if status == TRIGGERED else 0.0), 1)
     expires = now + timedelta(hours=12)
     setup_id = _setup_id(market.symbol, pattern, direction, trigger_level, current_price)
+    created_at = _iso(now)
     return ActionableSetup(
         setup_id=setup_id,
         symbol=market.symbol,
@@ -882,8 +943,17 @@ def _make_setup(
         reason=reason,
         invalidation=invalidation,
         conditions=conditions,
-        created_at=_iso(now),
+        created_at=created_at,
         expires_at=_iso(expires),
+        event_id=_event_id(setup_id, now),
+        policy_version=ACTIONABLE_POLICY_VERSION,
+        detected_at=created_at,
+        triggered_at=created_at if status == TRIGGERED else "",
+        market_source=market.source,
+        funding_rate=market.futures_context.funding_rate,
+        open_interest=market.futures_context.open_interest,
+        long_short_ratio=market.futures_context.long_short_ratio,
+        spread_pct=market.futures_context.spread_pct,
     )
 
 
@@ -1008,6 +1078,17 @@ def _setup_id(symbol: str, pattern: str, direction: str, level: float, price: fl
     bucket = round(level / step)
     digest = hashlib.sha1(f"{symbol}|{pattern}|{direction}|{bucket}".encode("utf-8")).hexdigest()[:10]
     return f"{symbol}-{pattern}-{direction}-{digest}"
+
+
+def _event_id(setup_id: str, now: datetime) -> str:
+    digest = hashlib.sha1(f"{setup_id}|{_iso(now)}".encode("utf-8")).hexdigest()[:10]
+    return f"{setup_id}-{digest}"
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def _action_for_status(status: str, direction: str, low: float, high: float) -> str:

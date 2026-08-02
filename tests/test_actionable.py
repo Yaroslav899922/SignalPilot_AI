@@ -450,6 +450,109 @@ class ActionableSetupTests(unittest.TestCase):
 
         self.assertEqual(events, [])
 
+    def test_state_changes_preserve_one_event_identity(self):
+        armed_at = datetime(2026, 7, 19, 17, 0, tzinfo=timezone.utc)
+        triggered_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        armed_market = _market(
+            one_hour_close=116.0,
+            one_hour_low=114.8,
+            volume=900.0,
+            confirm_macd=0.1,
+        )
+        triggered_market = _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0)
+        armed = analyze_actionable_setup(armed_market, now_utc=armed_at)
+        candidate = analyze_actionable_setup(triggered_market, now_utc=triggered_at)
+        assert armed is not None and candidate is not None
+
+        self.assertTrue(armed.to_dict().get("event_id"))
+        events = reconcile_setup_state(candidate, [armed], triggered_market, now_utc=triggered_at)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].to_dict().get("event_id"), armed.to_dict().get("event_id"))
+        self.assertEqual(events[0].to_dict().get("detected_at"), armed.created_at)
+        self.assertEqual(events[0].to_dict().get("triggered_at"), triggered_at.isoformat())
+
+    def test_same_level_can_start_a_new_event_after_cooldown(self):
+        first_trigger_at = datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc)
+        market = _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0)
+        first = analyze_actionable_setup(market, now_utc=first_trigger_at)
+        assert first is not None
+        retired = replace(
+            first,
+            status=TARGET_HIT,
+            created_at="2026-07-19T19:00:00+00:00",
+        )
+        next_event_at = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+        candidate = analyze_actionable_setup(market, now_utc=next_event_at)
+        assert candidate is not None
+
+        events = reconcile_setup_state(
+            candidate,
+            [first, retired],
+            market,
+            now_utc=next_event_at,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].setup_id, first.setup_id)
+        self.assertNotEqual(events[0].to_dict().get("event_id"), first.to_dict().get("event_id"))
+
+    def test_actionable_signal_carries_policy_event_and_market_provenance(self):
+        market = replace(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            futures_context=FuturesContext(
+                funding_rate=0.0001,
+                open_interest=123456.0,
+                long_short_ratio=1.2,
+                spread_pct=0.015,
+            ),
+        )
+        setup = analyze_actionable_setup(
+            market,
+            now_utc=datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc),
+        )
+        assert setup is not None
+
+        signal = setup_to_signal(setup)
+        data = signal.to_dict()
+
+        self.assertEqual(data.get("policy_version"), "v3.1")
+        self.assertTrue(data.get("event_id"))
+        self.assertEqual(data.get("market_source"), "binance_usdm_public")
+        self.assertEqual(data.get("detected_at"), setup.created_at)
+        self.assertEqual(data.get("triggered_at"), setup.created_at)
+        self.assertEqual(signal.funding_rate, 0.0001)
+        self.assertEqual(signal.open_interest, 123456.0)
+        self.assertEqual(signal.long_short_ratio, 1.2)
+        self.assertEqual(signal.spread_pct, 0.015)
+
+    def test_legacy_setup_payload_gets_explicit_legacy_metadata(self):
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc),
+        )
+        assert setup is not None
+        payload = setup.to_dict()
+        for key in (
+            "event_id",
+            "policy_version",
+            "detected_at",
+            "triggered_at",
+            "market_source",
+            "funding_rate",
+            "open_interest",
+            "long_short_ratio",
+            "spread_pct",
+        ):
+            payload.pop(key)
+
+        restored = type(setup).from_dict(payload)
+
+        self.assertEqual(restored.event_id, setup.setup_id)
+        self.assertEqual(restored.policy_version, "legacy_unversioned")
+        self.assertEqual(restored.detected_at, setup.created_at)
+        self.assertEqual(restored.triggered_at, "")
+
 
 def _market(
     *,

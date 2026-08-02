@@ -13,14 +13,15 @@ def save_setup_event(setup: ActionableSetup, db_path: str | Path) -> bool:
     connection = sqlite3.connect(path)
     try:
         ensure_schema(connection)
+        event_key = setup.event_id or setup.setup_id
         latest = connection.execute(
             """
             SELECT status, fingerprint FROM setup_events
-            WHERE setup_id = ?
+            WHERE COALESCE(NULLIF(event_id, ''), setup_id) = ?
             ORDER BY id DESC
             LIMIT 1
             """,
-            (setup.setup_id,),
+            (event_key,),
         ).fetchone()
         if latest is not None and latest[0] == setup.status and latest[1] == setup.fingerprint:
             return False
@@ -30,8 +31,10 @@ def save_setup_event(setup: ActionableSetup, db_path: str | Path) -> bool:
                 setup_id, symbol, pattern, direction, status, regime, current_price,
                 trigger_level, entry_low, entry_high, stop, targets_json, risk_reward,
                 score, action, reason, invalidation, conditions_json, created_at,
-                expires_at, source, fingerprint
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                expires_at, source, fingerprint, event_id, policy_version,
+                detected_at, triggered_at, market_source, funding_rate, open_interest,
+                long_short_ratio, spread_pct
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 setup.setup_id,
@@ -56,6 +59,15 @@ def save_setup_event(setup: ActionableSetup, db_path: str | Path) -> bool:
                 setup.expires_at,
                 setup.source,
                 setup.fingerprint,
+                setup.event_id,
+                setup.policy_version,
+                setup.detected_at,
+                setup.triggered_at,
+                setup.market_source,
+                setup.funding_rate,
+                setup.open_interest,
+                setup.long_short_ratio,
+                setup.spread_pct,
             ),
         )
         connection.commit()
@@ -75,7 +87,11 @@ def load_latest_setups(db_path: str | Path) -> list[ActionableSetup]:
         rows = connection.execute(
             """
             SELECT * FROM setup_events
-            WHERE id IN (SELECT MAX(id) FROM setup_events GROUP BY setup_id)
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM setup_events
+                GROUP BY COALESCE(NULLIF(event_id, ''), setup_id)
+            )
             ORDER BY id ASC
             """
         ).fetchall()
@@ -114,16 +130,50 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             source TEXT NOT NULL,
-            fingerprint TEXT NOT NULL
+            fingerprint TEXT NOT NULL,
+            event_id TEXT NOT NULL DEFAULT '',
+            policy_version TEXT NOT NULL DEFAULT 'legacy_unversioned',
+            detected_at TEXT NOT NULL DEFAULT '',
+            triggered_at TEXT NOT NULL DEFAULT '',
+            market_source TEXT NOT NULL DEFAULT '',
+            funding_rate REAL,
+            open_interest REAL,
+            long_short_ratio REAL,
+            spread_pct REAL
         )
         """
     )
+    existing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(setup_events)").fetchall()
+    }
+    for column_name, column_definition in _ADDED_COLUMNS.items():
+        if column_name not in existing_columns:
+            connection.execute(f"ALTER TABLE setup_events ADD COLUMN {column_definition}")
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_setup_events_latest
         ON setup_events(setup_id, id)
         """
     )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_setup_events_event_latest
+        ON setup_events(event_id, id)
+        """
+    )
+
+
+_ADDED_COLUMNS = {
+    "event_id": "event_id TEXT NOT NULL DEFAULT ''",
+    "policy_version": "policy_version TEXT NOT NULL DEFAULT 'legacy_unversioned'",
+    "detected_at": "detected_at TEXT NOT NULL DEFAULT ''",
+    "triggered_at": "triggered_at TEXT NOT NULL DEFAULT ''",
+    "market_source": "market_source TEXT NOT NULL DEFAULT ''",
+    "funding_rate": "funding_rate REAL",
+    "open_interest": "open_interest REAL",
+    "long_short_ratio": "long_short_ratio REAL",
+    "spread_pct": "spread_pct REAL",
+}
 
 
 def _row_to_setup(row: sqlite3.Row) -> ActionableSetup:

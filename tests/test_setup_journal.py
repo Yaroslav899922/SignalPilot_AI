@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -6,7 +7,13 @@ from pathlib import Path
 
 from tests.test_actionable import _market
 
-from signalpilot.actionable import ARMED, INVALIDATED, TRIGGERED, analyze_actionable_setup
+from signalpilot.actionable import (
+    ARMED,
+    INVALIDATED,
+    TRIGGERED,
+    analyze_actionable_setup,
+    reconcile_setup_state,
+)
 from signalpilot.setup_journal import load_latest_setups, save_setup_event
 
 
@@ -29,6 +36,14 @@ class SetupJournalTests(unittest.TestCase):
         self.assertEqual(armed.status, ARMED)
         self.assertEqual(triggered.status, TRIGGERED)
         self.assertEqual(armed.setup_id, triggered.setup_id)
+        triggered_events = reconcile_setup_state(
+            triggered,
+            [armed],
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(len(triggered_events), 1)
+        triggered = triggered_events[0]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "signals.sqlite3"
@@ -40,6 +55,11 @@ class SetupJournalTests(unittest.TestCase):
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0].status, TRIGGERED)
         self.assertEqual(latest[0].conditions, triggered.conditions)
+        self.assertEqual(latest[0].event_id, triggered.event_id)
+        self.assertEqual(latest[0].policy_version, "v3.1")
+        self.assertEqual(latest[0].detected_at, armed.created_at)
+        self.assertEqual(latest[0].triggered_at, triggered.created_at)
+        self.assertEqual(latest[0].market_source, "binance_usdm_public")
 
     def test_same_state_can_be_saved_again_after_an_invalidation(self):
         armed = analyze_actionable_setup(
@@ -68,6 +88,84 @@ class SetupJournalTests(unittest.TestCase):
             latest = load_latest_setups(path)
 
         self.assertEqual(latest[0].status, ARMED)
+
+    def test_same_level_keeps_separate_latest_rows_for_independent_events(self):
+        first = analyze_actionable_setup(
+            _market(one_hour_close=114.9, one_hour_low=114.5, volume=800.0),
+            now_utc=datetime(2026, 7, 19, 17, 0, tzinfo=timezone.utc),
+        )
+        assert first is not None
+        second = replace(
+            first,
+            event_id=f"{first.setup_id}-later-event",
+            created_at="2026-07-20T17:00:00+00:00",
+            detected_at="2026-07-20T17:00:00+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "signals.sqlite3"
+            self.assertTrue(save_setup_event(first, path))
+            self.assertTrue(save_setup_event(second, path))
+            latest = load_latest_setups(path)
+
+        self.assertEqual([setup.event_id for setup in latest], [first.event_id, second.event_id])
+
+    def test_legacy_setup_table_is_migrated_for_event_metadata(self):
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=datetime(2026, 7, 19, 18, 0, tzinfo=timezone.utc),
+        )
+        assert setup is not None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "signals.sqlite3"
+            _create_legacy_setup_table(path)
+
+            self.assertTrue(save_setup_event(setup, path))
+            latest = load_latest_setups(path)
+
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0].event_id, setup.event_id)
+        self.assertEqual(latest[0].policy_version, "v3.1")
+        self.assertEqual(latest[0].detected_at, setup.detected_at)
+        self.assertEqual(latest[0].triggered_at, setup.triggered_at)
+
+
+def _create_legacy_setup_table(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE setup_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                setup_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                regime TEXT NOT NULL,
+                current_price REAL NOT NULL,
+                trigger_level REAL NOT NULL,
+                entry_low REAL NOT NULL,
+                entry_high REAL NOT NULL,
+                stop REAL NOT NULL,
+                targets_json TEXT NOT NULL,
+                risk_reward REAL NOT NULL,
+                score REAL NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                invalidation TEXT NOT NULL,
+                conditions_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                fingerprint TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

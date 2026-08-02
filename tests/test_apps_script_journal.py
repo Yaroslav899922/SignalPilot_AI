@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from signalpilot import apps_script_journal
@@ -40,6 +41,31 @@ class AppsScriptJournalTests(unittest.TestCase):
         self.assertEqual(payload["token"], "journal-token")
         self.assertEqual(payload["signal"]["symbol"], "BTCUSDT")
         self.assertEqual(payload["signal"]["targets"], [110.0])
+
+    def test_save_actionable_signal_posts_measurement_metadata(self):
+        signal = replace(
+            _signal(),
+            source="actionable_alert",
+            setup_id="BTCUSDT-breakout-level",
+            event_id="BTCUSDT-breakout-event-1",
+            policy_version="v3.1",
+            detected_at="2026-07-19T17:00:00+00:00",
+            triggered_at="2026-07-19T18:00:00+00:00",
+            market_source="binance_usdm_public",
+        )
+        with patch.dict(os.environ, _env(), clear=True):
+            with patch(
+                "signalpilot.apps_script_journal.urlopen",
+                return_value=FakeResponse({"ok": True, "inserted": True}),
+            ) as urlopen:
+                apps_script_journal.save_signal(signal)
+
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))["signal"]
+        self.assertEqual(payload["event_id"], signal.event_id)
+        self.assertEqual(payload["policy_version"], "v3.1")
+        self.assertEqual(payload["detected_at"], signal.detected_at)
+        self.assertEqual(payload["triggered_at"], signal.triggered_at)
+        self.assertEqual(payload["market_source"], signal.market_source)
 
     def test_load_evaluable_signals_returns_signal_rows(self):
         rows = [
@@ -113,6 +139,8 @@ class AppsScriptJournalTests(unittest.TestCase):
         self.assertTrue(inserted)
         self.assertEqual(payload["action"], "save_setup_event")
         self.assertEqual(payload["setup"]["setup_id"], setup.setup_id)
+        self.assertEqual(payload["setup"]["event_id"], setup.event_id)
+        self.assertEqual(payload["setup"]["policy_version"], "v3.1")
         self.assertEqual(payload["setup"]["status"], "ARMED")
         self.assertEqual(payload["fingerprint"], setup.fingerprint)
 
@@ -196,6 +224,11 @@ def _setup() -> ActionableSetup:
         conditions=(SetupCondition("level", "Рівень", False),),
         created_at="2026-07-19T18:00:00+00:00",
         expires_at="2026-07-20T06:00:00+00:00",
+        event_id="BTCUSDT-breakout-LONG-test-event-1",
+        policy_version="v3.1",
+        detected_at="2026-07-19T17:00:00+00:00",
+        triggered_at="",
+        market_source="binance_usdm_public",
     )
 
 

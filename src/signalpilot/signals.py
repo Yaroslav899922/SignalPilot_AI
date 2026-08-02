@@ -41,6 +41,11 @@ class Signal:
     setup_id: str = ""
     setup_status: str = ""
     expires_at: str = ""
+    event_id: str = ""
+    policy_version: str = "legacy_unversioned"
+    detected_at: str = ""
+    triggered_at: str = ""
+    market_source: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
