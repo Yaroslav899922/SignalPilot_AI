@@ -8,11 +8,20 @@ signal in a local SQLite journal or, for the free server setup, a Google Sheet.
 This project does not place orders, does not trade automatically, and does not
 provide any financial guarantee.
 
+The canonical forward-measurement rules are frozen in
+[`SignalPilot-v3.1-Measurement-Protocol-2026-08-02.md`](SignalPilot-v3.1-Measurement-Protocol-2026-08-02.md).
+The evidence, current Sheet diagnostics, root causes, and action plan are in
+[`SignalPilot-Deep-Audit-2026-08-02.md`](SignalPilot-Deep-Audit-2026-08-02.md).
+The v3.1 fixes are currently committed locally but **not deployed**. Historical
+Google Sheet rows remain diagnostic; the comparable v3.1 cohort starts only
+after a verified cutover and a recorded `measurement_start_utc`.
+
 ## Current MVP Scope
 
 - Symbols: `BTCUSDT`, `ETHUSDT`, `SOLUSDT` by default.
-- Timeframes: `15m`, `1h`, `4h` by default. The `1h` setup remains the signal
-  and paper-evaluation interval.
+- Timeframes: `15m`, `1h`, `4h` by default. Actionable scenarios use `4h` and
+  `1h` for context, then a closed `15m` candle for confirmation and evaluation.
+  The older single-timeframe path remains a separate legacy `1h` mode.
 - Market candles: only closed candles are used; the default kline limit is
   `500` to give EMA 200 enough warmup.
 - Futures context: latest funding rate, current open interest, global
@@ -22,19 +31,25 @@ provide any financial guarantee.
   invalidation rule, trailing plan, pattern name, setup score, market regime,
   close price, futures context, liquidity context, and reasons.
 - Live chart analyst: modular `market_data -> patterns -> trade_plan -> Signal`
-  flow. The first professional pattern is `breakout_retest`; it only alerts
+  flow. The first modular pattern is `breakout_retest`; it only alerts
   when 4h/1h/15m context, futures filters, stop, target, and minimum setup
   quality agree.
 - Journal: SQLite table for local runs, or Google Sheets through Apps Script for
-  the free GitHub + Google server setup. Repeated identical live signals are
-  skipped so rerunning the same market state does not inflate paper-test
-  statistics.
-- Measurement loop: evaluated directional alerts store `result_R`,
-  `baseline_R`, and `edge_R` so live ideas can be judged against a simple
-  market-entry baseline instead of only by win/loss.
+  the free GitHub + Google server setup. A structural `setup_id` may recur, but
+  each independent market event has an `event_id`; state changes preserve that
+  identity and the same structural level cannot re-arm until 12 hours after a
+  terminal event.
+- Measurement loop: actionable alerts store `result_R`, `baseline_R`, and
+  paired `edge_R`. The baseline enters in the same direction at the first fully
+  eligible 15m candle open with the same absolute stop/T1 geometry. Barrier win
+  rate excludes timed-out events, while expectancy and edge use the same paired
+  terminal population. The fixed paper cost is 0.12% round trip.
 - Report: compact CLI summary of live paper-test journal results.
-- Scheduler: optional live paper-test loop that regularly collects signals,
-  evaluates older directional signals, and prints a journal report.
+- Scheduler: GitHub Actions sends three market briefs per day and up to 92 quiet
+  setup checks per day. Each job attempts start/finish receipts in
+  `scheduler_runs`; this detects failed, stale, and unfinished runs only among
+  receipts that reached Apps Script. Independent absence monitoring is still
+  required.
 - Dashboard: optional Streamlit view for the SQLite signal journal.
 - Historical paper backtest: scans past `1h` candles for rule-based LONG/SHORT
   signals and reports target/stop/no-result statistics. It is explicitly
@@ -49,10 +64,14 @@ report against baseline. Reports must separate signal quality, fill mechanics,
 and exit geometry where applicable.
 
 For paired strategy comparisons, report `delta_R = strategy_R -
-context_baseline_R` by `signal_id`, then calculate the mean and month-block CI
-over those deltas. Every month-block CI in the report must show both
-`n_months_delta_CI` and `months_delta_CI` so the sample behind the interval is
-visible.
+context_baseline_R` by independent event. Correlated BTC/ETH/SOL rows must not
+be treated as i.i.d. observations. Historical RIG reports use their documented
+month-block fields; the actionable v3.1 hypothesis uses the exact joint 7-day
+time-block algorithm and single endpoint frozen in the canonical protocol.
+
+The current CLI/Telegram summary is an operational all-time view. It does not
+yet filter by `measurement_start_utc` or calculate the confirmatory bootstrap
+gate, so it must not be read as the v3.1 hypothesis verdict.
 
 ## Quick Start
 
@@ -88,7 +107,7 @@ Run the live analyst and journal the result:
 python -m signalpilot --live-analyst --symbols BTCUSDT ETHUSDT SOLUSDT
 ```
 
-Send only professional directional alerts to Telegram:
+Send only directional alerts that pass the configured filters to Telegram:
 
 ```powershell
 $env:TELEGRAM_BOT_TOKEN = "123456:your-bot-token"
@@ -145,7 +164,8 @@ TRADINGVIEW_WEBHOOK_SECRET = довгий секретний текст для T
 
 Проста схема:
 
-- GitHub Actions - це "будильник", який раз на годину запускає SignalPilot.
+- GitHub Actions — це "будильник": він надсилає три огляди на добу та тихо
+  перевіряє actionable-сценарії приблизно кожні 15 хвилин.
 - Google Sheet - це журнал, куди пишуться сигнали.
 - Google Apps Script - це маленький приймач команд Telegram і міст між
   Telegram, Google Sheet та GitHub Actions.
@@ -158,8 +178,8 @@ Render лишається тільки optional paid варіантом. Для 
 1. Відкрий Google Sheets.
 2. Створи нову таблицю.
 3. Назви її, наприклад: `SignalPilot Journal`.
-4. Нічого вручну в таблиці заповнювати не треба. Apps Script сам створить лист
-   `signals` і потрібні колонки.
+4. Нічого вручну в таблиці заповнювати не треба. Apps Script сам створить листи
+   `signals`, `setup_events`, `scheduler_runs` і потрібні колонки.
 
 ### 2. Додай Apps Script
 
@@ -180,7 +200,7 @@ JOURNAL_API_TOKEN = інший довгий секретний текст, на�
 GITHUB_TOKEN = GitHub personal access token для запуску workflow
 GITHUB_OWNER = Yaroslav899922
 GITHUB_REPO = SignalPilot_AI
-GITHUB_WORKFLOW_FILE = market-check.yml
+GITHUB_WORKFLOW_FILE = market-brief.yml
 ```
 
 Після деплою Apps Script додай ще одну властивість:
@@ -241,19 +261,26 @@ SIGNALPILOT_JOURNAL_API_TOKEN = той самий текст, що JOURNAL_API_T
 SIGNALPILOT_JOURNAL_BACKEND = apps_script
 ```
 
-Це вже прописано у workflow-файлах:
+Це вже прописано в активному workflow:
 
-- `.github/workflows/live-paper-test.yml` - автоматичний запуск раз на годину.
-- `.github/workflows/market-check.yml` - ручна перевірка ринку з Telegram.
+- `.github/workflows/market-brief.yml` — ручні режими `brief`, `setup-check`,
+  `move-alert` та весь автоматичний розклад.
+
+Старі `live-paper-test.yml` і `market-check.yml` лежать у
+`.github/disabled-workflows/` лише як історія та не запускаються.
 
 ### 6. Перевір запуск
 
 1. У GitHub відкрий `Actions`.
-2. Вибери `SignalPilot Live Paper Test`.
-3. Натисни `Run workflow`.
+2. Вибери `SignalPilot Market Brief`.
+3. Натисни `Run workflow` і вибери потрібний режим.
 4. Дочекайся завершення.
-5. Перевір Google Sheet: має з'явитися лист `signals`.
-6. Перевір Telegram: мають прийти повідомлення SignalPilot.
+5. Перевір Google Sheet: у `scheduler_runs` має бути завершений receipt цього
+   запуску. Листи `signals` і `setup_events` створюються ліниво лише коли
+   відповідний режим реально має що записати; їхню відсутність після порожньої
+   перевірки не вважай помилкою.
+6. Для режиму `brief` перевір Telegram. `setup-check` навмисно мовчить, якщо
+   стан жодного сценарію не змінився.
 
 Потім у приватному чаті з ботом перевір команди:
 
@@ -329,6 +356,12 @@ paper-test журнал і надсилає підказки для ручног
 
 Бот все одно не торгує автоматично. Він тільки відповідає на команди і публікує
 сигнали для ручного аналізу.
+
+## Legacy local tools
+
+The commands below remain useful for diagnostics and the older single-timeframe
+paper loop. Their rows and summaries must not be mixed with the canonical
+actionable v3.1 cohort.
 
 Run the older single-timeframe mode when needed:
 
