@@ -126,13 +126,14 @@ def _try_fill(plan: Plan, open_, high, low) -> float | None:
     return None
 
 
-def _manage(trade: Trade, open_, high, low, close, now: pd.Timestamp, suppress_target: bool = False):
+def _manage(trade: Trade, open_, high, low, close, now: pd.Timestamp, suppress_target: bool = False,
+            timeout: pd.Timedelta = TIMEOUT):
     """Return (outcome, exit_price) or None.
 
     Order of checks: timeout (at bar open) -> stop -> target. Stop is assumed
     before target. On a limit fill candle, suppress_target hides the target.
     """
-    if now - trade.fill_time >= TIMEOUT:
+    if now - trade.fill_time >= timeout:
         return "timeout", float(open_)
     if trade.direction == "LONG":
         if low <= trade.stop:
@@ -195,7 +196,8 @@ def _trend_supports(direction: str, trend: str | None) -> bool:
 
 
 def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
-                   lifetime: str = "one_window", rest_bars: int = 8) -> ArmResult:
+                   lifetime: str = "one_window", rest_bars: int = 8,
+                   timeout: pd.Timedelta = TIMEOUT) -> ArmResult:
     result = ArmResult(arm=arm, symbol=symbol)
     if not decisions:
         return result
@@ -244,7 +246,7 @@ def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
                     pending = _create_pending(plan, result)
 
         if trade is not None:
-            ex = _manage(trade, c.open, c.high, c.low, c.close, t)
+            ex = _manage(trade, c.open, c.high, c.low, c.close, t, timeout=timeout)
             if ex is not None:
                 result.trades.append(_finalize(trade, ex[0], ex[1], t, zone_pierce=False))
                 trade = None
@@ -257,7 +259,8 @@ def simulate_plans(symbol: str, arm: str, decisions, d15: pd.DataFrame,
                 limit_fill = pending.plan.fill_mode == "limit"
                 trade = _open_trade(pending.plan, fill, t)
                 pending = None
-                ex = _manage(trade, c.open, c.high, c.low, c.close, t, suppress_target=limit_fill)
+                ex = _manage(trade, c.open, c.high, c.low, c.close, t, suppress_target=limit_fill,
+                             timeout=timeout)
                 if ex is not None:
                     zp = limit_fill and ex[0] == "stop"
                     result.trades.append(_finalize(trade, ex[0], ex[1], t, zone_pierce=zp))
@@ -301,7 +304,8 @@ def build_decisions(sym_data, arm: str):
     return out
 
 
-def simulate(sym_data, arm: str, lifetime: str = "one_window", rest_bars: int = 8) -> ArmResult:
+def simulate(sym_data, arm: str, lifetime: str = "one_window", rest_bars: int = 8,
+             timeout: pd.Timedelta = TIMEOUT) -> ArmResult:
     decisions = build_decisions(sym_data, arm)
     return simulate_plans(sym_data.symbol, arm, decisions, sym_data.bars15m,
-                          lifetime=lifetime, rest_bars=rest_bars)
+                          lifetime=lifetime, rest_bars=rest_bars, timeout=timeout)
