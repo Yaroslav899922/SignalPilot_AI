@@ -9,6 +9,7 @@ from signalpilot.actionable import (
     EXPIRED,
     STOPPED,
     TARGET_HIT,
+    TIMED_OUT,
     TRIGGERED,
     WATCH,
     analyze_actionable_setup,
@@ -341,6 +342,66 @@ class ActionableSetupTests(unittest.TestCase):
             [setup],
             market,
             now_utc=datetime(2026, 7, 19, 18, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(events, [])
+
+    def test_triggered_setup_excludes_candle_that_closes_after_expiry(self):
+        triggered_at = datetime(2026, 7, 19, 18, 7, tzinfo=timezone.utc)
+        setup = analyze_actionable_setup(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            now_utc=triggered_at,
+        )
+        assert setup is not None
+        market = _with_15m_candles(
+            _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0),
+            [
+                {
+                    "open_time": "2026-07-20T06:00:00Z",
+                    "close_time": "2026-07-20T06:14:59Z",
+                    "high": setup.targets[0] + 0.1,
+                    "low": setup.stop + 0.1,
+                }
+            ],
+        )
+
+        events = reconcile_setup_state(
+            None,
+            [setup],
+            market,
+            now_utc=datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].status, TIMED_OUT)
+
+    def test_historical_timeout_cannot_resurrect_when_another_setup_is_latest(self):
+        now = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+        market = _market(one_hour_close=116.0, one_hour_low=114.8, volume=1500.0)
+        triggered = analyze_actionable_setup(market, now_utc=now)
+        assert triggered is not None
+        timed_out = replace(
+            triggered,
+            status=TIMED_OUT,
+            created_at="2026-07-20T12:00:00+00:00",
+        )
+        later_other_setup = replace(
+            timed_out,
+            setup_id="BTCUSDT-other-LONG-example",
+            status=TARGET_HIT,
+            created_at="2026-07-20T12:30:00+00:00",
+        )
+        candidate = analyze_actionable_setup(
+            market,
+            now_utc=datetime(2026, 7, 20, 12, 45, tzinfo=timezone.utc),
+        )
+        assert candidate is not None
+
+        events = reconcile_setup_state(
+            candidate,
+            [timed_out, later_other_setup],
+            market,
+            now_utc=datetime(2026, 7, 20, 12, 45, tzinfo=timezone.utc),
         )
 
         self.assertEqual(events, [])

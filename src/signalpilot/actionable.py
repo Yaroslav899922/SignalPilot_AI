@@ -204,7 +204,7 @@ def reconcile_setup_state(
     # appears again, do not resurrect it and count/announce a second entry.
     if candidate is not None and any(
         setup.setup_id == candidate.setup_id
-        and setup.status in {TRIGGERED, TARGET_HIT, STOPPED, EXPIRED}
+        and setup.status in {TRIGGERED, TARGET_HIT, STOPPED, EXPIRED, TIMED_OUT}
         for setup in symbol_history
     ):
         candidate = None
@@ -369,7 +369,7 @@ def _closed_candles_since(
         eligible_mask = (open_times >= triggered_at) & (open_times < window_end)
         if "close_time" in candles.columns:
             close_times = pd.to_datetime(candles["close_time"], utc=True, errors="coerce")
-            eligible_mask &= close_times <= now_ts
+            eligible_mask &= close_times <= window_end
         eligible = candles.loc[eligible_mask].copy()
         return eligible.assign(_event_time=open_times.loc[eligible.index]).sort_values("_event_time").drop(
             columns="_event_time"
