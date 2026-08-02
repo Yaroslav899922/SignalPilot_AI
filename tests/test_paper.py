@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -159,6 +160,137 @@ class PaperEvaluationTests(unittest.TestCase):
         self.assertEqual(result.result_R, 1.976)
         self.assertIsNotNone(result.baseline_R)
         self.assertIsNotNone(result.edge_R)
+
+    def test_actionable_uses_only_fully_closed_candles_inside_trigger_and_expiry(self):
+        signal = {
+            **_signal(direction="LONG", stop=95.0, target=110.0),
+            "interval": "15m",
+            "source": "actionable_alert",
+            "created_at": "2026-05-31T00:07:00+00:00",
+            "triggered_at": "2026-05-31T00:07:00+00:00",
+            "expires_at": "2026-05-31T00:37:00+00:00",
+            "close_price": 100.0,
+        }
+        candles = pd.DataFrame(
+            {
+                "open_time": pd.to_datetime(
+                    [
+                        "2026-05-31T00:00:00Z",
+                        "2026-05-31T00:15:00Z",
+                        "2026-05-31T00:30:00Z",
+                        "2026-05-31T00:45:00Z",
+                    ],
+                    utc=True,
+                ),
+                "open": [100.0, 100.0, 105.0, 105.0],
+                "high": [111.0, 106.0, 111.0, 106.0],
+                "low": [99.0, 99.0, 99.0, 99.0],
+                "close": [110.0, 105.0, 110.0, 105.0],
+            }
+        )
+
+        result = evaluate_signal(signal, candles, lookahead_candles=48)
+
+        self.assertEqual(result.outcome, "no_result")
+        self.assertEqual(result.max_favorable_price, 106.0)
+        self.assertEqual(result.activated_at, "2026-05-31T00:07:00+00:00")
+
+    def test_actionable_includes_candle_closing_exactly_at_expiry(self):
+        signal = {
+            **_signal(direction="LONG", stop=95.0, target=110.0),
+            "interval": "15m",
+            "source": "actionable_alert",
+            "created_at": "2026-05-31T00:07:00+00:00",
+            "triggered_at": "2026-05-31T00:07:00+00:00",
+            "expires_at": "2026-05-31T00:30:00+00:00",
+            "close_price": 100.0,
+        }
+        candles = pd.DataFrame(
+            {
+                "open_time": pd.to_datetime(
+                    ["2026-05-31T00:15:00Z", "2026-05-31T00:30:00Z"], utc=True
+                ),
+                "open": [100.0, 110.0],
+                "high": [111.0, 112.0],
+                "low": [99.0, 109.0],
+                "close": [110.0, 111.0],
+            }
+        )
+
+        result = evaluate_signal(signal, candles, lookahead_candles=48)
+
+        self.assertEqual(result.outcome, "target_hit")
+
+    def test_actionable_future_expiry_blocks_evaluation_even_when_generic_age_has_passed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            signal = replace(
+                _plan("BTCUSDT", created_at="2026-07-19T00:00:00+00:00"),
+                interval="15m",
+                source="actionable_alert",
+                setup_id="BTCUSDT-future-expiry-setup",
+                event_id="BTCUSDT-future-expiry-event",
+                triggered_at="2026-07-19T00:00:00+00:00",
+                expires_at="2026-07-19T03:00:00+00:00",
+            )
+            save_signal(signal, db_path)
+            fetch_calls = []
+
+            results = evaluate_journal(
+                str(db_path),
+                lookahead_candles=4,
+                fetcher=lambda **kwargs: fetch_calls.append(kwargs),
+                now=pd.Timestamp("2026-07-19T02:00:00Z"),
+            )
+
+        self.assertEqual(results, [])
+        self.assertEqual(fetch_calls, [])
+
+    def test_actionable_waits_until_explicit_expiry_not_generic_lookahead(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            signal = replace(
+                _plan("BTCUSDT", created_at="2026-07-19T00:07:00+00:00"),
+                interval="15m",
+                source="actionable_alert",
+                setup_id="BTCUSDT-test-setup",
+                event_id="BTCUSDT-test-event",
+                triggered_at="2026-07-19T00:07:00+00:00",
+                expires_at="2026-07-19T02:07:00+00:00",
+            )
+            save_signal(signal, db_path)
+
+            fetch_calls = []
+
+            def fake_fetcher(symbol, interval, limit, end_time=None):
+                fetch_calls.append((symbol, end_time))
+                return pd.DataFrame(
+                    {
+                        "open_time": pd.date_range("2026-07-19T00:00:00Z", periods=12, freq="15min"),
+                        "open": [100.0] * 12,
+                        "high": [104.0] * 12,
+                        "low": [99.0] * 12,
+                        "close": [102.0] * 12,
+                    }
+                )
+
+            before = evaluate_journal(
+                str(db_path), 48, fetcher=fake_fetcher,
+                now=pd.Timestamp("2026-07-19T02:06:59Z"),
+            )
+            after = evaluate_journal(
+                str(db_path), 48, fetcher=fake_fetcher,
+                now=pd.Timestamp("2026-07-19T02:07:00Z"),
+            )
+
+        self.assertEqual(before, [])
+        self.assertEqual(len(after), 1)
+        self.assertEqual(
+            fetch_calls,
+            [("BTCUSDT", pd.Timestamp("2026-07-19T02:07:00Z"))],
+        )
+        self.assertEqual(after[0].outcome, "no_result")
+        self.assertEqual(after[0].activated_at, "2026-07-19T00:07:00+00:00")
 
 
 class EvaluateJournalAgeGateTests(unittest.TestCase):

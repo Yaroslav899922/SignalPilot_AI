@@ -33,20 +33,30 @@ class TelegramBotTests(unittest.TestCase):
                 "confirmed_pending": 1,
                 "confirmed_target_hit": 1,
                 "confirmed_stop_hit": 1,
-                "confirmed_no_result": 0,
+                "confirmed_timed_out": 1,
+                "confirmed_barrier_resolved": 2,
                 "confirmed_win_rate": 0.5,
-                "confirmed_result_R": 0.38,
-                "confirmed_baseline_R": -0.12,
-                "confirmed_edge_R": 0.5,
+                "confirmed_barrier_result_R": 0.38,
+                "confirmed_timed_out_result_R": 0.08,
+                "confirmed_paired_n": 2,
+                "confirmed_paired_result_R": 0.38,
+                "confirmed_paired_baseline_R": -0.12,
+                "confirmed_paired_edge_R": 0.5,
                 "legacy_market_brief_rows": 7,
             }
         )
 
         self.assertIn("<b>Звіт SignalPilot</b>", message)
         self.assertIn("<b>Входів:</b> 3", message)
-        self.assertIn("<b>Успішність завершених:</b> 50.0%", message)
-        self.assertIn("<b>Результат входів:</b> +0.38R", message)
-        self.assertIn("<b>Якби просто тримали:</b> -0.12R", message)
+        self.assertIn("<b>Завершено ціллю/стопом:</b> 2", message)
+        self.assertIn("<b>Завершено за часом:</b> 1", message)
+        self.assertIn("<b>Частка цілі серед ціль/стоп:</b> 50.0%", message)
+        self.assertIn("<b>Результат ціль/стоп:</b> +0.38R", message)
+        self.assertIn("<b>Парних спостережень:</b> 2", message)
+        self.assertIn("<b>Контроль: перша повна свічка, той самий напрямок і стоп/ціль:</b> -0.12R", message)
+        self.assertIn("не є доказом переваги", message)
+        self.assertNotIn("Якби просто тримали", message)
+        self.assertNotIn("Перевага сигналів", message)
         self.assertIn("<b>Старі оглядові плани (не входи):</b> 7", message)
         self.assertIn("без реальних угод", message)
 

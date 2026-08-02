@@ -161,6 +161,18 @@ def summarize_journal(db_path: str | Path) -> dict[str, object]:
         actionable_target = sum(row["outcome"] == "target_hit" for row in actionable_rows)
         actionable_stop = sum(row["outcome"] == "stop_hit" for row in actionable_rows)
         actionable_resolved = actionable_target + actionable_stop
+        barrier_rows = [
+            row for row in actionable_rows if row["outcome"] in ("target_hit", "stop_hit")
+        ]
+        timeout_rows = [row for row in actionable_rows if row["outcome"] == "no_result"]
+        terminal_rows = barrier_rows + timeout_rows
+        paired_rows = [
+            row
+            for row in terminal_rows
+            if row["result_R"] is not None and row["baseline_R"] is not None
+        ]
+        barrier_paired = [row for row in paired_rows if row["outcome"] in ("target_hit", "stop_hit")]
+        timeout_paired = [row for row in paired_rows if row["outcome"] == "no_result"]
         actionable_pending = sum(
             row["direction"] in ("LONG", "SHORT")
             and (row["outcome"] is None or row["outcome"] == "not_enough_data")
@@ -185,8 +197,21 @@ def summarize_journal(db_path: str | Path) -> dict[str, object]:
             "confirmed_pending": actionable_pending,
             "confirmed_target_hit": actionable_target,
             "confirmed_stop_hit": actionable_stop,
-            "confirmed_no_result": sum(row["outcome"] == "no_result" for row in actionable_rows),
+            "confirmed_barrier_resolved": actionable_resolved,
+            "confirmed_timed_out": len(timeout_rows),
+            "confirmed_terminal": len(terminal_rows),
+            "confirmed_no_result": len(timeout_rows),
+            "confirmed_unpaired_terminal": len(terminal_rows) - len(paired_rows),
             "confirmed_win_rate": actionable_target / actionable_resolved if actionable_resolved else None,
+            "confirmed_barrier_result_R": _sum_optional(barrier_rows, "result_R"),
+            "confirmed_timed_out_result_R": _sum_optional(timeout_rows, "result_R"),
+            "confirmed_barrier_paired_n": len(barrier_paired),
+            "confirmed_timed_out_paired_n": len(timeout_paired),
+            "confirmed_paired_n": len(paired_rows),
+            "confirmed_paired_result_R": _sum_optional(paired_rows, "result_R"),
+            "confirmed_paired_baseline_R": _sum_optional(paired_rows, "baseline_R"),
+            "confirmed_paired_edge_R": _sum_paired_edge(paired_rows),
+            # Compatibility aliases retain their historical populations for one cycle.
             "confirmed_result_R": _sum_optional(actionable_rows, "result_R"),
             "confirmed_baseline_R": _sum_optional(actionable_rows, "baseline_R"),
             "confirmed_edge_R": _sum_optional(actionable_rows, "edge_R"),
@@ -442,8 +467,20 @@ def _empty_summary() -> dict[str, object]:
         "confirmed_pending": 0,
         "confirmed_target_hit": 0,
         "confirmed_stop_hit": 0,
+        "confirmed_barrier_resolved": 0,
+        "confirmed_timed_out": 0,
+        "confirmed_terminal": 0,
         "confirmed_no_result": 0,
+        "confirmed_unpaired_terminal": 0,
         "confirmed_win_rate": None,
+        "confirmed_barrier_result_R": None,
+        "confirmed_timed_out_result_R": None,
+        "confirmed_barrier_paired_n": 0,
+        "confirmed_timed_out_paired_n": 0,
+        "confirmed_paired_n": 0,
+        "confirmed_paired_result_R": None,
+        "confirmed_paired_baseline_R": None,
+        "confirmed_paired_edge_R": None,
         "confirmed_result_R": None,
         "confirmed_baseline_R": None,
         "confirmed_edge_R": None,
@@ -454,3 +491,12 @@ def _empty_summary() -> dict[str, object]:
 def _sum_optional(rows: list[sqlite3.Row], column: str) -> float | None:
     values = [float(row[column]) for row in rows if row[column] is not None]
     return round(sum(values), 4) if values else None
+
+
+def _sum_paired_edge(rows: list[sqlite3.Row]) -> float | None:
+    if not rows:
+        return None
+    return round(
+        sum(float(row["result_R"]) - float(row["baseline_R"]) for row in rows),
+        4,
+    )

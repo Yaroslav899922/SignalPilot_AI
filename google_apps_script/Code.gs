@@ -263,6 +263,15 @@ function summarizeJournal_() {
   const confirmedTarget = confirmedRows.filter((row) => row.outcome === "target_hit").length;
   const confirmedStop = confirmedRows.filter((row) => row.outcome === "stop_hit").length;
   const confirmedResolved = confirmedTarget + confirmedStop;
+  const barrierRows = confirmedRows.filter((row) => ["target_hit", "stop_hit"].includes(row.outcome));
+  const timeoutRows = confirmedRows.filter((row) => row.outcome === "no_result");
+  const terminalRows = barrierRows.concat(timeoutRows);
+  const pairedRows = terminalRows.filter(
+    (row) => hasFiniteNumber_(row.result_R) && hasFiniteNumber_(row.baseline_R)
+  );
+  const barrierPaired = pairedRows.filter((row) => ["target_hit", "stop_hit"].includes(row.outcome));
+  const timeoutPaired = pairedRows.filter((row) => row.outcome === "no_result");
+  const pairedEdge = sumPairedEdge_(pairedRows);
   return {
     signals: rows.length,
     long: rows.filter((row) => row.direction === "LONG").length,
@@ -278,8 +287,20 @@ function summarizeJournal_() {
     confirmed_pending: confirmedRows.filter((row) => !row.outcome || row.outcome === "not_enough_data").length,
     confirmed_target_hit: confirmedTarget,
     confirmed_stop_hit: confirmedStop,
-    confirmed_no_result: confirmedRows.filter((row) => row.outcome === "no_result").length,
+    confirmed_barrier_resolved: confirmedResolved,
+    confirmed_timed_out: timeoutRows.length,
+    confirmed_terminal: terminalRows.length,
+    confirmed_no_result: timeoutRows.length,
+    confirmed_unpaired_terminal: terminalRows.length - pairedRows.length,
     confirmed_win_rate: confirmedResolved ? confirmedTarget / confirmedResolved : null,
+    confirmed_barrier_result_R: sumOptional_(barrierRows, "result_R"),
+    confirmed_timed_out_result_R: sumOptional_(timeoutRows, "result_R"),
+    confirmed_barrier_paired_n: barrierPaired.length,
+    confirmed_timed_out_paired_n: timeoutPaired.length,
+    confirmed_paired_n: pairedRows.length,
+    confirmed_paired_result_R: sumOptional_(pairedRows, "result_R"),
+    confirmed_paired_baseline_R: sumOptional_(pairedRows, "baseline_R"),
+    confirmed_paired_edge_R: pairedEdge,
     confirmed_result_R: sumOptional_(confirmedRows, "result_R"),
     confirmed_baseline_R: sumOptional_(confirmedRows, "baseline_R"),
     confirmed_edge_R: sumOptional_(confirmedRows, "edge_R"),
@@ -406,7 +427,7 @@ function statusMessage_() {
 
 function reportMessage_(summary) {
   const winRate = summary.confirmed_win_rate === null || summary.confirmed_win_rate === undefined
-    ? "ще немає завершених входів"
+    ? "ще немає завершень ціллю/стопом"
     : `${(summary.confirmed_win_rate * 100).toFixed(1)}%`;
   return [
     "<b>Звіт SignalPilot</b>",
@@ -415,13 +436,18 @@ function reportMessage_(summary) {
     `<b>Входів:</b> ${summary.confirmed_entries || 0}`,
     `<b>Ціль спрацювала:</b> ${summary.confirmed_target_hit || 0}`,
     `<b>Захисний вихід:</b> ${summary.confirmed_stop_hit || 0}`,
+    `<b>Завершено ціллю/стопом:</b> ${summary.confirmed_barrier_resolved || 0}`,
+    `<b>Завершено за часом:</b> ${summary.confirmed_timed_out || 0}`,
     `<b>Ще перевіряються:</b> ${summary.confirmed_pending || 0}`,
-    `<b>Без чіткого результату:</b> ${summary.confirmed_no_result || 0}`,
-    `<b>Успішність завершених:</b> ${winRate}`,
+    `<b>Частка цілі серед ціль/стоп:</b> ${winRate}`,
     "",
-    `<b>Результат входів:</b> ${formatR_(summary.confirmed_result_R)}`,
-    `<b>Якби просто тримали:</b> ${formatR_(summary.confirmed_baseline_R)}`,
-    `<b>Перевага сигналів:</b> ${formatR_(summary.confirmed_edge_R)}`,
+    `<b>Результат ціль/стоп:</b> ${formatR_(summary.confirmed_barrier_result_R)}`,
+    `<b>Результат завершених за часом:</b> ${formatR_(summary.confirmed_timed_out_result_R)}`,
+    `<b>Парних спостережень:</b> ${summary.confirmed_paired_n || 0}`,
+    `<b>Сигнал на парних рядках:</b> ${formatR_(summary.confirmed_paired_result_R)}`,
+    `<b>Контроль: перша повна свічка, той самий напрямок і стоп/ціль:</b> ${formatR_(summary.confirmed_paired_baseline_R)}`,
+    `<b>Різниця на парних рядках:</b> ${formatR_(summary.confirmed_paired_edge_R)}`,
+    "Порівняння описове й саме по собі не є доказом переваги.",
     "",
     `<b>Старі оглядові плани (не входи):</b> ${summary.legacy_market_brief_rows || 0}`,
     "Це навчальна перевірка без реальних угод.",
@@ -660,6 +686,21 @@ function sumOptional_(rows, column) {
     return null;
   }
   return Math.round(values.reduce((total, value) => total + value, 0) * 10000) / 10000;
+}
+
+function hasFiniteNumber_(value) {
+  return value !== "" && value !== null && value !== undefined && Number.isFinite(Number(value));
+}
+
+function sumPairedEdge_(rows) {
+  if (!rows.length) {
+    return null;
+  }
+  const total = rows.reduce(
+    (sum, row) => sum + Number(row.result_R) - Number(row.baseline_R),
+    0
+  );
+  return Math.round(total * 10000) / 10000;
 }
 
 function formatR_(value) {

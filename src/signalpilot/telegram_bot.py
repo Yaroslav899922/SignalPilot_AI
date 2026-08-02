@@ -89,8 +89,17 @@ def handle_update(
 def format_report_message(summary: dict[str, object]) -> str:
     win_rate = summary.get("confirmed_win_rate")
     win_rate_text = (
-        "ще немає завершених входів" if win_rate is None else f"{float(win_rate):.1%}"
+        "ще немає завершень ціллю/стопом" if win_rate is None else f"{float(win_rate):.1%}"
     )
+    barrier_resolved = summary.get(
+        "confirmed_barrier_resolved",
+        int(summary.get("confirmed_target_hit", 0)) + int(summary.get("confirmed_stop_hit", 0)),
+    )
+    timed_out = summary.get("confirmed_timed_out", summary.get("confirmed_no_result", 0))
+    paired_n = summary.get("confirmed_paired_n", 0)
+    paired_result = summary.get("confirmed_paired_result_R")
+    paired_baseline = summary.get("confirmed_paired_baseline_R")
+    paired_edge = summary.get("confirmed_paired_edge_R")
     return "\n".join(
         [
             "<b>Звіт SignalPilot</b>",
@@ -99,13 +108,18 @@ def format_report_message(summary: dict[str, object]) -> str:
             f"<b>Входів:</b> {summary.get('confirmed_entries', 0)}",
             f"<b>Ціль спрацювала:</b> {summary.get('confirmed_target_hit', 0)}",
             f"<b>Захисний вихід:</b> {summary.get('confirmed_stop_hit', 0)}",
+            f"<b>Завершено ціллю/стопом:</b> {barrier_resolved}",
+            f"<b>Завершено за часом:</b> {timed_out}",
             f"<b>Ще перевіряються:</b> {summary.get('confirmed_pending', 0)}",
-            f"<b>Без чіткого результату:</b> {summary.get('confirmed_no_result', 0)}",
-            f"<b>Успішність завершених:</b> {win_rate_text}",
+            f"<b>Частка цілі серед ціль/стоп:</b> {win_rate_text}",
             "",
-            f"<b>Результат входів:</b> {_format_r(summary.get('confirmed_result_R'))}",
-            f"<b>Якби просто тримали:</b> {_format_r(summary.get('confirmed_baseline_R'))}",
-            f"<b>Перевага сигналів:</b> {_format_r(summary.get('confirmed_edge_R'))}",
+            f"<b>Результат ціль/стоп:</b> {_format_r(summary.get('confirmed_barrier_result_R'))}",
+            f"<b>Результат завершених за часом:</b> {_format_r(summary.get('confirmed_timed_out_result_R'))}",
+            f"<b>Парних спостережень:</b> {paired_n}",
+            f"<b>Сигнал на парних рядках:</b> {_format_r(paired_result)}",
+            f"<b>Контроль: перша повна свічка, той самий напрямок і стоп/ціль:</b> {_format_r(paired_baseline)}",
+            f"<b>Різниця на парних рядках:</b> {_format_r(paired_edge)}",
+            "Порівняння описове й саме по собі не є доказом переваги.",
             "",
             f"<b>Старі оглядові плани (не входи):</b> {summary.get('legacy_market_brief_rows', 0)}",
             "Це навчальна перевірка без реальних угод.",

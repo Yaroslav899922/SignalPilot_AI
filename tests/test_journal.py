@@ -201,6 +201,10 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(summary["signals"], 0)
         self.assertEqual(summary["pending"], 0)
         self.assertIsNone(summary["win_rate"])
+        self.assertEqual(summary["confirmed_barrier_resolved"], 0)
+        self.assertEqual(summary["confirmed_timed_out"], 0)
+        self.assertEqual(summary["confirmed_paired_n"], 0)
+        self.assertIsNone(summary["confirmed_paired_edge_R"])
 
     def test_summarize_journal_counts_directions_outcomes_and_win_rate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -302,6 +306,57 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(summary["confirmed_edge_R"], 0.96)
         self.assertEqual(summary["legacy_market_brief_rows"], 1)
 
+    def test_confirmed_summary_separates_barriers_timeouts_and_same_row_pairs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "signals.sqlite3"
+            signals = [
+                _confirmed_event(1, "LONG"),
+                _confirmed_event(2, "SHORT"),
+                _confirmed_event(3, "LONG"),
+                _confirmed_event(4, "SHORT"),
+                _confirmed_event(5, "LONG"),
+            ]
+            for signal in signals:
+                self.assertTrue(save_signal(signal, db_path))
+
+            update_signal_evaluation(
+                db_path, 1, "target_hit", 110.0, 99.0,
+                result_R=1.5, baseline_R=1.0, edge_R=99.0,
+            )
+            update_signal_evaluation(
+                db_path, 2, "stop_hit", 95.0, 106.0,
+                result_R=-1.0, baseline_R=-0.5, edge_R=None,
+            )
+            update_signal_evaluation(
+                db_path, 3, "no_result", 104.0, 98.0,
+                result_R=0.2, baseline_R=0.1, edge_R=-99.0,
+            )
+            update_signal_evaluation(
+                db_path, 5, "target_hit", 110.0, 99.0,
+                result_R=1.5, baseline_R=None, edge_R=None,
+            )
+
+            summary = summarize_journal(db_path)
+
+        self.assertEqual(summary["confirmed_entries"], 5)
+        self.assertEqual(summary["confirmed_barrier_resolved"], 3)
+        self.assertEqual(summary["confirmed_timed_out"], 1)
+        self.assertEqual(summary["confirmed_terminal"], 4)
+        self.assertEqual(summary["confirmed_pending"], 1)
+        self.assertEqual(summary["confirmed_unpaired_terminal"], 1)
+        self.assertAlmostEqual(summary["confirmed_win_rate"], 2 / 3)
+        self.assertEqual(summary["confirmed_barrier_result_R"], 2.0)
+        self.assertEqual(summary["confirmed_timed_out_result_R"], 0.2)
+        self.assertEqual(summary["confirmed_barrier_paired_n"], 2)
+        self.assertEqual(summary["confirmed_timed_out_paired_n"], 1)
+        self.assertEqual(summary["confirmed_paired_n"], 3)
+        self.assertEqual(summary["confirmed_paired_result_R"], 0.7)
+        self.assertEqual(summary["confirmed_paired_baseline_R"], 0.6)
+        self.assertEqual(summary["confirmed_paired_edge_R"], 0.1)
+        self.assertEqual(summary["confirmed_result_R"], 2.2)
+        self.assertEqual(summary["confirmed_baseline_R"], 0.6)
+        self.assertEqual(summary["confirmed_edge_R"], 0.0)
+
 
 def _signal(direction: str, created_at: str) -> Signal:
     is_directional = direction in {"LONG", "SHORT"}
@@ -323,6 +378,16 @@ def _signal(direction: str, created_at: str) -> Signal:
         invalidation="Close beyond stop" if is_directional else "Wait",
         reasons=("Test signal",),
         created_at=created_at,
+    )
+
+
+def _confirmed_event(number: int, direction: str) -> Signal:
+    return replace(
+        _signal(direction=direction, created_at=f"2026-07-19T{number:02d}:00:00+00:00"),
+        source="actionable_alert",
+        setup_id=f"BTCUSDT-setup-{number}",
+        event_id=f"BTCUSDT-event-{number}",
+        setup_status="TRIGGERED",
     )
 
 

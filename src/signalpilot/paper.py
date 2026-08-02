@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from inspect import Parameter, signature
 
 import pandas as pd
 
@@ -41,10 +42,16 @@ def evaluate_journal(
     for signal in load_evaluable_signals(db_path):
         if not _evaluation_window_closed(signal, lookahead_candles, now_ts):
             continue
+        fetch_kwargs: dict[str, object] = {
+            "symbol": str(signal["symbol"]),
+            "interval": str(signal["interval"]),
+            "limit": max(lookahead_candles + 72, 200),
+        }
+        deadline = _signal_deadline(signal)
+        if deadline is not None and _accepts_keyword(fetcher, "end_time"):
+            fetch_kwargs["end_time"] = deadline
         candles = fetcher(
-            symbol=str(signal["symbol"]),
-            interval=str(signal["interval"]),
-            limit=max(lookahead_candles + 72, 200),
+            **fetch_kwargs,
         )
         result = evaluate_signal(signal, candles, lookahead_candles)
         update_signal_evaluation(
@@ -69,9 +76,14 @@ def evaluate_signal(
 ) -> EvaluationResult:
     symbol = str(signal["symbol"])
     direction = str(signal["direction"])
-    future_candles = _future_candles(candles, str(signal["created_at"]), lookahead_candles)
+    future_candles = _future_candles(candles, signal, lookahead_candles)
+    has_explicit_deadline = _signal_deadline(signal) is not None
 
-    if len(future_candles) < lookahead_candles:
+    if (
+        not len(future_candles)
+        or (has_explicit_deadline and not _explicit_window_covered(candles, signal))
+        or (not has_explicit_deadline and len(future_candles) < lookahead_candles)
+    ):
         return EvaluationResult(
             signal_id=_signal_id(signal),
             symbol=symbol,
@@ -83,6 +95,7 @@ def evaluate_signal(
 
     stop = signal.get("stop")
     targets = json.loads(str(signal.get("targets_json", "[]")))
+    activated_at = _actionable_activated_at(signal)
     if stop is None or not targets:
         return EvaluationResult(
             signal_id=_signal_id(signal),
@@ -91,11 +104,12 @@ def evaluate_signal(
             outcome="no_result",
             max_favorable_price=None,
             max_adverse_price=None,
+            activated_at=activated_at,
         )
 
     stop_price = float(stop)
     target_price = float(targets[0])
-    window = future_candles.head(lookahead_candles)
+    window = future_candles if has_explicit_deadline else future_candles.head(lookahead_candles)
 
     if _is_market_brief_plan(signal):
         return _evaluate_market_brief_plan(signal, window, stop_price, target_price)
@@ -121,6 +135,7 @@ def evaluate_signal(
         result_R=result_R,
         baseline_R=baseline_R,
         edge_R=edge_R,
+        activated_at=activated_at,
     )
 
 
@@ -207,21 +222,105 @@ def _evaluation_window_closed(
     now: pd.Timestamp,
 ) -> bool:
     """True, коли повне вікно спостереження плану вже минуло і його час оцінювати."""
-    try:
-        created = pd.to_datetime(str(signal["created_at"]), utc=True)
-    except (KeyError, TypeError, ValueError):
+    deadline = _signal_deadline(signal)
+    if deadline is not None:
+        return bool(_as_utc(now) >= deadline)
+    created = _signal_start(signal)
+    if created is None:
         return True
     hours = _INTERVAL_HOURS.get(str(signal.get("interval") or "1h"), 1.0)
-    return bool(now >= created + pd.Timedelta(hours=lookahead_candles * hours))
+    return bool(_as_utc(now) >= created + pd.Timedelta(hours=lookahead_candles * hours))
 
 
-def _future_candles(candles: pd.DataFrame, created_at: str, lookahead_candles: int) -> pd.DataFrame:
+def _future_candles(
+    candles: pd.DataFrame,
+    signal: dict[str, object],
+    lookahead_candles: int,
+) -> pd.DataFrame:
     if "open_time" not in candles.columns:
         return candles.head(lookahead_candles)
 
-    created = pd.to_datetime(created_at, utc=True)
+    start = _signal_start(signal)
+    if start is None:
+        return candles.head(lookahead_candles)
     open_times = pd.to_datetime(candles["open_time"], utc=True)
-    return candles.loc[open_times >= created].head(lookahead_candles)
+    mask = open_times >= start
+    deadline = _signal_deadline(signal)
+    if deadline is not None:
+        mask &= _candle_close_times(candles, signal) <= deadline
+    selected = candles.loc[mask].copy()
+    selected = selected.sort_values("open_time")
+    return selected if deadline is not None else selected.head(lookahead_candles)
+
+
+def _signal_start(signal: dict[str, object]) -> pd.Timestamp | None:
+    triggered = _timestamp_or_none(signal.get("triggered_at"))
+    if triggered is not None:
+        return triggered
+    return _timestamp_or_none(signal.get("created_at"))
+
+
+def _signal_deadline(signal: dict[str, object]) -> pd.Timestamp | None:
+    return _timestamp_or_none(signal.get("expires_at"))
+
+
+def _timestamp_or_none(value: object) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    try:
+        return pd.to_datetime(str(value), utc=True)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_utc(value: pd.Timestamp) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("utc")
+    return timestamp.tz_convert("utc")
+
+
+def _candle_close_times(
+    candles: pd.DataFrame,
+    signal: dict[str, object],
+) -> pd.Series:
+    if "close_time" in candles.columns:
+        return pd.to_datetime(candles["close_time"], utc=True)
+    open_times = pd.to_datetime(candles["open_time"], utc=True)
+    hours = _INTERVAL_HOURS.get(str(signal.get("interval") or "1h"), 1.0)
+    return open_times + pd.Timedelta(hours=hours)
+
+
+def _explicit_window_covered(
+    candles: pd.DataFrame,
+    signal: dict[str, object],
+) -> bool:
+    deadline = _signal_deadline(signal)
+    if deadline is None or candles.empty or "open_time" not in candles.columns:
+        return False
+    close_times = _candle_close_times(candles, signal)
+    if close_times.empty:
+        return False
+    hours = _INTERVAL_HOURS.get(str(signal.get("interval") or "1h"), 1.0)
+    return bool(close_times.max() + pd.Timedelta(hours=hours) >= deadline)
+
+
+def _actionable_activated_at(signal: dict[str, object]) -> str | None:
+    if str(signal.get("source") or "") != "actionable_alert":
+        return None
+    activated = _signal_start(signal)
+    return activated.isoformat() if activated is not None else None
+
+
+def _accepts_keyword(callable_object: object, keyword: str) -> bool:
+    try:
+        parameters = signature(callable_object).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == keyword or parameter.kind == Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _outcome(direction: str, stop: float, target: float, candles: pd.DataFrame) -> str:
