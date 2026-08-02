@@ -195,6 +195,32 @@ class PaperEvaluationTests(unittest.TestCase):
         self.assertEqual(result.max_favorable_price, 106.0)
         self.assertEqual(result.activated_at, "2026-05-31T00:07:00+00:00")
 
+    def test_actionable_off_grid_expiry_accepts_last_binance_candle(self):
+        signal = {
+            **_signal(direction="LONG", stop=95.0, target=110.0),
+            "interval": "15m",
+            "source": "actionable_alert",
+            "created_at": "2026-05-31T00:07:00+00:00",
+            "triggered_at": "2026-05-31T00:07:00+00:00",
+            "expires_at": "2026-05-31T00:37:00+00:00",
+            "close_price": 100.0,
+        }
+        candles = pd.DataFrame(
+            {
+                "open_time": pd.to_datetime(["2026-05-31T00:15:00Z"], utc=True),
+                "close_time": pd.to_datetime(["2026-05-31T00:29:59.999Z"], utc=True),
+                "open": [100.0],
+                "high": [106.0],
+                "low": [99.0],
+                "close": [105.0],
+            }
+        )
+
+        result = evaluate_signal(signal, candles, lookahead_candles=48)
+
+        self.assertEqual(result.outcome, "no_result")
+        self.assertEqual(result.max_favorable_price, 106.0)
+
     def test_actionable_includes_candle_closing_exactly_at_expiry(self):
         signal = {
             **_signal(direction="LONG", stop=95.0, target=110.0),
