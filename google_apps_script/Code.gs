@@ -1,5 +1,10 @@
 const SIGNALS_SHEET_NAME = "signals";
 const SETUPS_SHEET_NAME = "setup_events";
+const SCHEDULER_RUNS_SHEET_NAME = "scheduler_runs";
+const SCHEDULER_SCHEMA_VERSION = "scheduler-receipt/v1";
+const SCHEDULER_TERMINAL_STATUSES = Object.freeze(["success", "failure", "cancelled"]);
+const SCHEDULER_STEP_RESULTS = Object.freeze(["", "success", "failure", "cancelled", "skipped"]);
+const SCHEDULER_STATUS_WINDOW_ROWS = 2000;
 const SIGNAL_COLUMNS = [
   "id",
   "created_at",
@@ -75,6 +80,25 @@ const SETUP_COLUMNS = [
   "long_short_ratio",
   "spread_pct",
 ];
+const SCHEDULER_RUN_COLUMNS = [
+  "run_key",
+  "schema_version",
+  "repository",
+  "workflow",
+  "job",
+  "run_id",
+  "run_attempt",
+  "event_name",
+  "event_schedule",
+  "mode",
+  "commit_sha",
+  "run_url",
+  "started_at",
+  "finished_at",
+  "status",
+  "steps_json",
+  "updated_at",
+];
 
 function doPost(e) {
   const payload = parsePayload_(e);
@@ -113,6 +137,12 @@ function handleJournalApi_(payload) {
     }
     if (payload.action === "load_latest_setups") {
       return jsonResponse_({ ok: true, setups: loadLatestSetups_() });
+    }
+    if (payload.action === "save_scheduler_receipt") {
+      return jsonResponse_(saveSchedulerReceipt_(payload.receipt));
+    }
+    if (payload.action === "summarize_scheduler_runs") {
+      return jsonResponse_({ ok: true, summary: summarizeSchedulerRuns_() });
     }
   } catch (error) {
     const message = String(error && error.message ? error.message : error);
@@ -455,10 +485,33 @@ function helpMessage_() {
 }
 
 function statusMessage_() {
+  const scheduler = summarizeSchedulerRuns_();
+  const healthLabels = {
+    healthy: "працює за розкладом",
+    degraded: "потрібна увага",
+    unknown: "ще немає даних",
+  };
+  const warningLabels = {
+    stale_running: "є завислий запуск",
+    no_setup_check_success: "немає успішного setup-check за розкладом",
+    stale_setup_check: "setup-check давно не завершувався успішно",
+    no_brief_success: "немає успішного market brief за розкладом",
+    stale_brief: "market brief давно не завершувався успішно",
+    latest_setup_check_failed: "останній setup-check завершився помилкою",
+    latest_brief_failed: "останній market brief завершився помилкою",
+    missing_start: "є завершення без записаного старту",
+  };
+  const warnings = (scheduler.warnings || []).map(
+    (warning) => warningLabels[warning] || warning
+  );
   return [
-    "<b>Статус:</b> бот працює",
+    "<b>Статус:</b> бот відповідає",
     "<b>Журнал:</b> Google Sheet",
     "<b>Режим:</b> GitHub Actions + Google Apps Script",
+    `<b>Планувальник:</b> ${healthLabels[scheduler.health] || scheduler.health}`,
+    `<b>Останній setup-check:</b> ${formatSchedulerTimestamp_(scheduler.last_setup_success_at)}`,
+    `<b>Останній market brief:</b> ${formatSchedulerTimestamp_(scheduler.last_brief_success_at)}`,
+    ...(warnings.length ? [`<b>Увага:</b> ${warnings.join("; ")}`] : []),
     "Напиши <b>надай звіт</b> або <b>є торгова ситуація?</b>.",
   ].join("\n");
 }
@@ -493,39 +546,31 @@ function reportMessage_(summary) {
 }
 
 function getSignalsSheet_() {
-  const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
-  const spreadsheet = spreadsheetId ? SpreadsheetApp.openById(spreadsheetId) : SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = spreadsheet.getSheetByName(SIGNALS_SHEET_NAME);
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(SIGNALS_SHEET_NAME);
-  }
-  const headers = readHeaders_(sheet, SIGNAL_COLUMNS.length);
-  if (headers.join("") === "") {
-    sheet.getRange(1, 1, 1, SIGNAL_COLUMNS.length).setValues([SIGNAL_COLUMNS]);
-  } else {
-    ensureSignalColumns_(sheet, headers);
-  }
-  return sheet;
+  return getConfiguredSheet_(SIGNALS_SHEET_NAME, SIGNAL_COLUMNS);
 }
 
 function getSetupsSheet_() {
-  const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
-  const spreadsheet = spreadsheetId ? SpreadsheetApp.openById(spreadsheetId) : SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = spreadsheet.getSheetByName(SETUPS_SHEET_NAME);
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(SETUPS_SHEET_NAME);
-  }
-  const headers = readHeaders_(sheet, SETUP_COLUMNS.length);
-  if (headers.join("") === "") {
-    sheet.getRange(1, 1, 1, SETUP_COLUMNS.length).setValues([SETUP_COLUMNS]);
-  } else {
-    ensureColumns_(sheet, headers, SETUP_COLUMNS);
-  }
-  return sheet;
+  return getConfiguredSheet_(SETUPS_SHEET_NAME, SETUP_COLUMNS);
 }
 
-function ensureSignalColumns_(sheet, headers) {
-  ensureColumns_(sheet, headers, SIGNAL_COLUMNS);
+function getSchedulerRunsSheet_() {
+  return getConfiguredSheet_(SCHEDULER_RUNS_SHEET_NAME, SCHEDULER_RUN_COLUMNS);
+}
+
+function getConfiguredSheet_(sheetName, expectedColumns) {
+  const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
+  const spreadsheet = spreadsheetId ? SpreadsheetApp.openById(spreadsheetId) : SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+  const headers = readHeaders_(sheet, expectedColumns.length);
+  if (headers.join("") === "") {
+    sheet.getRange(1, 1, 1, expectedColumns.length).setValues([expectedColumns]);
+  } else {
+    ensureColumns_(sheet, headers, expectedColumns);
+  }
+  return sheet;
 }
 
 function ensureColumns_(sheet, headers, expectedColumns) {
@@ -557,10 +602,14 @@ function readHeaders_(sheet, minimumColumns) {
 }
 
 function appendMappedRow_(sheet, expectedColumns, values) {
+  const headers = readHeaders_(sheet, expectedColumns.length);
+  appendMappedRowWithHeaders_(sheet, headers, expectedColumns, values);
+}
+
+function appendMappedRowWithHeaders_(sheet, headers, expectedColumns, values) {
   if (expectedColumns.length !== values.length) {
     throw new Error("column/value count mismatch");
   }
-  const headers = readHeaders_(sheet, expectedColumns.length);
   const byColumn = {};
   expectedColumns.forEach((column, index) => {
     byColumn[column] = values[index];
@@ -569,6 +618,15 @@ function appendMappedRow_(sheet, expectedColumns, values) {
     Object.prototype.hasOwnProperty.call(byColumn, header) ? byColumn[header] : ""
   ));
   sheet.getRange(sheet.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
+}
+
+function updateMappedRow_(sheet, rowNumber, headers, currentRow, updates) {
+  const row = currentRow.slice();
+  Object.keys(updates).forEach((column) => {
+    const index = requiredColumnIndex_(headers, column);
+    row[index] = updates[column];
+  });
+  sheet.getRange(rowNumber, 1, 1, headers.length).setValues([row]);
 }
 
 function requiredColumnIndex_(headers, column) {
@@ -675,17 +733,410 @@ function loadLatestSetups_() {
   });
 }
 
+function saveSchedulerReceipt_(receipt) {
+  return withScriptLock_(() => saveSchedulerReceiptUnlocked_(receipt));
+}
+
+function saveSchedulerReceiptUnlocked_(receipt) {
+  const normalized = validateSchedulerReceipt_(receipt || {});
+  const sheet = getSchedulerRunsSheet_();
+  const headers = readHeaders_(sheet, SCHEDULER_RUN_COLUMNS.length);
+  const matchingRow = findSchedulerRowNumber_(sheet, headers, normalized.run_key);
+
+  let existing = null;
+  let existingValues = null;
+  if (matchingRow !== null) {
+    existingValues = sheet.getRange(matchingRow, 1, 1, headers.length).getValues()[0];
+    existing = {};
+    headers.forEach((header, index) => {
+      if (header) {
+        existing[header] = existingValues[index];
+      }
+    });
+  }
+
+  const transition = schedulerTransitionValidated_(existing, normalized);
+  if (transition.inserted) {
+    appendMappedRowWithHeaders_(
+      sheet,
+      headers,
+      SCHEDULER_RUN_COLUMNS,
+      SCHEDULER_RUN_COLUMNS.map((column) => transition.row[column])
+    );
+  } else if (transition.updated) {
+    updateMappedRow_(sheet, matchingRow, headers, existingValues, transition.row);
+  }
+  return {
+    ok: true,
+    run_key: normalized.run_key,
+    status: String(transition.row.status),
+    inserted: transition.inserted,
+    updated: transition.updated,
+    missing_start: transition.missing_start,
+  };
+}
+
+function findSchedulerRowNumber_(sheet, headers, runKey) {
+  const runKeyColumn = requiredColumnIndex_(headers, "run_key");
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    return null;
+  }
+  const matchingRows = sheet
+    .getRange(2, runKeyColumn + 1, lastRow - 1, 1)
+    .createTextFinder(String(runKey))
+    .matchEntireCell(true)
+    .findAll()
+    .map((range) => range.getRow());
+  return uniqueSchedulerRowNumber_(matchingRows, runKey);
+}
+
+function uniqueSchedulerRowNumber_(matchingRows, runKey) {
+  if (matchingRows.length > 1) {
+    throw new Error(`duplicate scheduler run_key: ${runKey}`);
+  }
+  return matchingRows.length ? matchingRows[0] : null;
+}
+
+function validateSchedulerReceipt_(receipt) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+    throw new Error("scheduler receipt must be an object");
+  }
+  if (receipt.schema_version !== SCHEDULER_SCHEMA_VERSION) {
+    throw new Error("unsupported scheduler receipt schema_version");
+  }
+
+  const normalized = Object.assign({}, receipt);
+  [
+    "run_key",
+    "repository",
+    "workflow",
+    "job",
+    "run_id",
+    "event_name",
+    "mode",
+    "commit_sha",
+    "run_url",
+    "observed_at",
+  ].forEach((field) => {
+    normalized[field] = String(receipt[field] === undefined ? "" : receipt[field]).trim();
+    if (!normalized[field]) {
+      throw new Error(`missing scheduler receipt field: ${field}`);
+    }
+  });
+  normalized.event_schedule = String(receipt.event_schedule || "").trim();
+  normalized.run_attempt = String(
+    receipt.run_attempt === undefined ? "" : receipt.run_attempt
+  ).trim();
+  if (!/^\d+$/.test(normalized.run_attempt) || Number(normalized.run_attempt) < 1) {
+    throw new Error("scheduler run_attempt must be a positive integer");
+  }
+  const expectedRunKey = [
+    normalized.repository,
+    normalized.run_id,
+    normalized.run_attempt,
+    normalized.job,
+  ].join(":");
+  if (normalized.run_key !== expectedRunKey) {
+    throw new Error("scheduler receipt run_key does not match its identity fields");
+  }
+  if (!["start", "finish"].includes(receipt.phase)) {
+    throw new Error("scheduler receipt phase must be start or finish");
+  }
+  normalized.phase = receipt.phase;
+  normalized.status = String(receipt.status || "");
+  if (normalized.phase === "start" && normalized.status !== "running") {
+    throw new Error("start receipt must be running");
+  }
+  if (
+    normalized.phase === "finish" &&
+    !SCHEDULER_TERMINAL_STATUSES.includes(normalized.status)
+  ) {
+    throw new Error("finish receipt must have a terminal status");
+  }
+  if (
+    Number.isNaN(Date.parse(normalized.observed_at)) ||
+    !/(Z|\+00:00)$/.test(normalized.observed_at)
+  ) {
+    throw new Error("scheduler observed_at must be a UTC timestamp");
+  }
+  if (!receipt.steps || typeof receipt.steps !== "object" || Array.isArray(receipt.steps)) {
+    throw new Error("scheduler receipt steps must be an object");
+  }
+  Object.keys(receipt.steps).forEach((stepId) => {
+    const result = receipt.steps[stepId];
+    if (!stepId || !result || typeof result !== "object" || Array.isArray(result)) {
+      throw new Error("scheduler step results must contain outcome and conclusion");
+    }
+    const resultKeys = Object.keys(result).sort();
+    if (resultKeys.join(",") !== "conclusion,outcome") {
+      throw new Error("scheduler step results must contain outcome and conclusion");
+    }
+    if (
+      typeof result.outcome !== "string" ||
+      typeof result.conclusion !== "string" ||
+      !SCHEDULER_STEP_RESULTS.includes(result.outcome) ||
+      !SCHEDULER_STEP_RESULTS.includes(result.conclusion)
+    ) {
+      throw new Error("scheduler step outcome and conclusion are invalid");
+    }
+  });
+  normalized.steps = receipt.steps;
+  return normalized;
+}
+
+function schedulerTransition_(existing, receipt) {
+  const normalized = validateSchedulerReceipt_(receipt);
+  return schedulerTransitionValidated_(existing, normalized);
+}
+
+function schedulerTransitionValidated_(existing, normalized) {
+  if (!existing) {
+    const insertedRow = schedulerRowFromReceipt_(normalized);
+    if (normalized.phase === "start") {
+      insertedRow.started_at = normalized.observed_at;
+    } else {
+      insertedRow.finished_at = normalized.observed_at;
+    }
+    return {
+      row: insertedRow,
+      inserted: true,
+      updated: false,
+      missing_start: normalized.phase === "finish",
+    };
+  }
+
+  validateSchedulerIdentity_(existing, normalized);
+  const currentStatus = String(existing.status || "");
+  const isTerminal = SCHEDULER_TERMINAL_STATUSES.includes(currentStatus);
+  const missingStart = !String(existing.started_at || "");
+  if (normalized.phase === "start") {
+    return {
+      row: Object.assign({}, existing),
+      inserted: false,
+      updated: false,
+      missing_start: missingStart,
+    };
+  }
+  if (isTerminal) {
+    if (currentStatus !== normalized.status) {
+      throw new Error(
+        `conflicting terminal status: ${currentStatus} versus ${normalized.status}`
+      );
+    }
+    return {
+      row: Object.assign({}, existing),
+      inserted: false,
+      updated: false,
+      missing_start: missingStart,
+    };
+  }
+  if (currentStatus !== "running") {
+    throw new Error(`invalid existing scheduler status: ${currentStatus}`);
+  }
+
+  const updatedRow = schedulerRowFromReceipt_(normalized);
+  updatedRow.started_at = existing.started_at || "";
+  updatedRow.finished_at = normalized.observed_at;
+  return {
+    row: updatedRow,
+    inserted: false,
+    updated: true,
+    missing_start: missingStart,
+  };
+}
+
+function schedulerRowFromReceipt_(receipt) {
+  return {
+    run_key: receipt.run_key,
+    schema_version: receipt.schema_version,
+    repository: receipt.repository,
+    workflow: receipt.workflow,
+    job: receipt.job,
+    run_id: receipt.run_id,
+    run_attempt: receipt.run_attempt,
+    event_name: receipt.event_name,
+    event_schedule: receipt.event_schedule,
+    mode: receipt.mode,
+    commit_sha: receipt.commit_sha,
+    run_url: receipt.run_url,
+    started_at: "",
+    finished_at: "",
+    status: receipt.status,
+    steps_json: JSON.stringify(receipt.steps),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function validateSchedulerIdentity_(existing, receipt) {
+  [
+    "run_key",
+    "schema_version",
+    "repository",
+    "workflow",
+    "job",
+    "run_id",
+    "run_attempt",
+    "event_name",
+    "event_schedule",
+    "mode",
+    "commit_sha",
+    "run_url",
+  ].forEach((field) => {
+    if (String(existing[field] || "") !== String(receipt[field] || "")) {
+      throw new Error(`scheduler receipt identity conflict: ${field}`);
+    }
+  });
+}
+
+function summarizeSchedulerRuns_() {
+  const sheet = getSchedulerRunsSheet_();
+  const rows = readRecentRows_(sheet, SCHEDULER_STATUS_WINDOW_ROWS);
+  const summary = summarizeSchedulerRunsAt_(rows, Date.now());
+  summary.total_runs = Math.max(sheet.getLastRow() - 1, 0);
+  summary.window_rows = rows.length;
+  return summary;
+}
+
+function summarizeSchedulerRunsAt_(rows, nowMs) {
+  const scheduled = rows.filter((row) => String(row.event_name || "") === "schedule");
+  if (!scheduled.length) {
+    return {
+      health: "unknown",
+      warnings: [],
+      scheduled_runs: 0,
+      running: 0,
+      stale_running: 0,
+      failed_last_24h: 0,
+      missing_start_last_24h: 0,
+      last_setup_success_at: null,
+      last_brief_success_at: null,
+    };
+  }
+
+  const runningRows = scheduled.filter((row) => String(row.status || "") === "running");
+  const staleRows = runningRows.filter((row) => {
+    const startedMs = Date.parse(String(row.started_at || row.updated_at || ""));
+    return Number.isNaN(startedMs) || nowMs - startedMs > 45 * 60 * 1000;
+  });
+  const last24Hours = scheduled.filter((row) => {
+    const finishedMs = Date.parse(schedulerRowTimestamp_(row));
+    return !Number.isNaN(finishedMs) && nowMs - finishedMs >= 0 && nowMs - finishedMs <= 24 * 60 * 60 * 1000;
+  });
+  const failedRows = last24Hours.filter(
+    (row) => ["failure", "cancelled"].includes(String(row.status || ""))
+  );
+  const missingStartRows = last24Hours.filter(
+    (row) => SCHEDULER_TERMINAL_STATUSES.includes(String(row.status || "")) &&
+      !String(row.started_at || "")
+  );
+  const successfulSetup = latestSchedulerRow_(
+    scheduled.filter(
+      (row) => String(row.mode || "") === "setup-check" && String(row.status || "") === "success"
+    )
+  );
+  const successfulBrief = latestSchedulerRow_(
+    scheduled.filter(
+      (row) => String(row.mode || "") === "brief" && String(row.status || "") === "success"
+    )
+  );
+  const latestSetup = latestSchedulerRow_(
+    scheduled.filter((row) => String(row.mode || "") === "setup-check")
+  );
+  const latestBrief = latestSchedulerRow_(
+    scheduled.filter((row) => String(row.mode || "") === "brief")
+  );
+  const warnings = [];
+  if (staleRows.length) {
+    warnings.push("stale_running");
+  }
+  if (!successfulSetup) {
+    warnings.push("no_setup_check_success");
+  } else if (nowMs - Date.parse(schedulerRowTimestamp_(successfulSetup)) > 90 * 60 * 1000) {
+    warnings.push("stale_setup_check");
+  }
+  if (!successfulBrief) {
+    warnings.push("no_brief_success");
+  } else if (nowMs - Date.parse(schedulerRowTimestamp_(successfulBrief)) > 12 * 60 * 60 * 1000) {
+    warnings.push("stale_brief");
+  }
+  if (
+    latestSetup &&
+    ["failure", "cancelled"].includes(String(latestSetup.status || ""))
+  ) {
+    warnings.push("latest_setup_check_failed");
+  }
+  if (
+    latestBrief &&
+    ["failure", "cancelled"].includes(String(latestBrief.status || ""))
+  ) {
+    warnings.push("latest_brief_failed");
+  }
+  if (missingStartRows.length) {
+    warnings.push("missing_start");
+  }
+  return {
+    health: warnings.length ? "degraded" : "healthy",
+    warnings: warnings,
+    scheduled_runs: scheduled.length,
+    running: runningRows.length,
+    stale_running: staleRows.length,
+    failed_last_24h: failedRows.length,
+    missing_start_last_24h: missingStartRows.length,
+    last_setup_success_at: successfulSetup ? schedulerRowTimestamp_(successfulSetup) : null,
+    last_brief_success_at: successfulBrief ? schedulerRowTimestamp_(successfulBrief) : null,
+  };
+}
+
+function latestSchedulerRow_(rows) {
+  return rows.reduce((latest, row) => {
+    if (!latest) {
+      return row;
+    }
+    const currentMs = Date.parse(schedulerRowTimestamp_(row));
+    const latestMs = Date.parse(schedulerRowTimestamp_(latest));
+    return (!Number.isNaN(currentMs) && (Number.isNaN(latestMs) || currentMs > latestMs))
+      ? row
+      : latest;
+  }, null);
+}
+
+function schedulerRowTimestamp_(row) {
+  return String(row.finished_at || row.updated_at || row.started_at || "");
+}
+
+function formatSchedulerTimestamp_(value) {
+  return value ? String(value) : "ще немає даних";
+}
+
 function readRows_(sheet) {
   const values = sheet.getDataRange().getValues();
   if (values.length <= 1) {
     return [];
   }
-  const headers = values[0].map((value) => String(value).trim());
+  return mapRows_(values[0], values.slice(1));
+}
+
+function readRecentRows_(sheet, maximumRows) {
+  const lastRow = Number(sheet.getLastRow()) || 0;
+  if (lastRow <= 1) {
+    return [];
+  }
+  const rowCount = Math.min(lastRow - 1, maximumRows);
+  const headers = readHeaders_(sheet, 1);
+  const rows = sheet
+    .getRange(lastRow - rowCount + 1, 1, rowCount, headers.length)
+    .getValues();
+  return mapRows_(headers, rows);
+}
+
+function mapRows_(rawHeaders, rows) {
+  const headers = rawHeaders.map((value) => String(value).trim());
   const namedHeaders = headers.filter((header) => header);
   if (new Set(namedHeaders).size !== namedHeaders.length) {
     throw new Error("duplicate sheet headers");
   }
-  return values.slice(1).filter((row) => row.join("") !== "").map((row) => {
+  return rows.filter((row) => row.join("") !== "").map((row) => {
     const item = {};
     headers.forEach((header, index) => {
       if (header) {
