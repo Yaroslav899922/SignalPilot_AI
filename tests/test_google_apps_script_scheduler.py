@@ -216,8 +216,393 @@ console.log(JSON.stringify({ row: data[1], writes }));
         self.assertEqual(result["writes"], 1)
 
 
+@unittest.skipUnless(NODE, "Node.js is required to execute Apps Script state tests")
+class GoogleAppsScriptJournalExecutionTests(unittest.TestCase):
+    def test_triggered_setup_is_durable_when_the_following_signal_write_fails(self):
+        result = _run_case(
+            """
+const signalSheet = inMemorySheet_(SIGNAL_COLUMNS, []);
+const setupSheet = inMemorySheet_(SETUP_COLUMNS, []);
+getSignalsSheet_ = () => signalSheet;
+getSetupsSheet_ = () => setupSheet;
+signalSheet.failNextSetValues();
+
+const payload = triggeredPayload_();
+let firstError = "";
+try {
+  saveTriggeredEvent_(payload);
+} catch (error) {
+  firstError = String(error.message || error);
+}
+const rowsAfterFailure = {
+  signals: signalSheet.bodyRows().length,
+  setups: setupSheet.bodyRows().length,
+};
+const retry = saveTriggeredEvent_(payload);
+console.log(JSON.stringify({
+  firstError,
+  rowsAfterFailure,
+  retry,
+  finalRows: {
+    signals: signalSheet.bodyRows().length,
+    setups: setupSheet.bodyRows().length,
+  },
+}));
+"""
+        )
+
+        self.assertIn("injected setValues failure", result["firstError"])
+        self.assertEqual(result["rowsAfterFailure"], {"signals": 0, "setups": 1})
+        self.assertEqual(
+            result["retry"],
+            {
+                "ok": True,
+                "signal_inserted": True,
+                "setup_inserted": False,
+                "event_id": "event-1",
+            },
+        )
+        self.assertEqual(result["finalRows"], {"signals": 1, "setups": 1})
+
+    def test_stale_triggered_bundle_does_not_create_a_signal(self):
+        result = _run_case(
+            """
+const signalSheet = inMemorySheet_(SIGNAL_COLUMNS, []);
+const setupSheet = inMemorySheet_(SETUP_COLUMNS, [
+  setupRow_("ARMED", "armed-later", "2026-08-02T10:20:00Z"),
+]);
+getSignalsSheet_ = () => signalSheet;
+getSetupsSheet_ = () => setupSheet;
+const payload = triggeredPayload_();
+const receipt = saveTriggeredEvent_(payload);
+console.log(JSON.stringify({
+  receipt,
+  signals: signalSheet.bodyRows().length,
+  setups: setupSheet.bodyRows().length,
+}));
+"""
+        )
+
+        self.assertFalse(result["receipt"]["signal_inserted"])
+        self.assertFalse(result["receipt"]["setup_inserted"])
+        self.assertTrue(result["receipt"]["stale"])
+        self.assertEqual(result["signals"], 0)
+        self.assertEqual(result["setups"], 1)
+
+    def test_parallel_first_observations_keep_one_active_event(self):
+        result = _run_case(
+            """
+const signalSheet = inMemorySheet_(SIGNAL_COLUMNS, []);
+const setupSheet = inMemorySheet_(SETUP_COLUMNS, []);
+getSignalsSheet_ = () => signalSheet;
+getSetupsSheet_ = () => setupSheet;
+
+const firstPayload = triggeredPayload_();
+const first = saveTriggeredEvent_(firstPayload);
+const secondPayload = triggeredPayload_();
+secondPayload.setup.event_id = "event-2";
+secondPayload.signal.event_id = "event-2";
+secondPayload.setup.created_at = "2026-08-02T10:10:01Z";
+secondPayload.setup.triggered_at = "2026-08-02T10:10:01Z";
+secondPayload.signal.created_at = "2026-08-02T10:10:01Z";
+secondPayload.signal.triggered_at = "2026-08-02T10:10:01Z";
+secondPayload.fingerprint = "triggered-2";
+const second = saveTriggeredEvent_(secondPayload);
+console.log(JSON.stringify({
+  first,
+  second,
+  signals: signalSheet.bodyRows().length,
+  setups: setupSheet.bodyRows().length,
+}));
+"""
+        )
+
+        self.assertTrue(result["first"]["signal_inserted"])
+        self.assertTrue(result["first"]["setup_inserted"])
+        self.assertFalse(result["second"]["signal_inserted"])
+        self.assertFalse(result["second"]["setup_inserted"])
+        self.assertTrue(result["second"]["stale"])
+        self.assertEqual(result["signals"], 1)
+        self.assertEqual(result["setups"], 1)
+
+    def test_evaluation_update_is_one_mapped_row_write(self):
+        result = _run_case(
+            """
+const headers = ["custom_note"].concat(SIGNAL_COLUMNS.slice().reverse());
+const row = mappedRow_(headers, {
+  custom_note: "keep me",
+  id: 7,
+  outcome: "not_enough_data",
+});
+const sheet = inMemorySheet_(headers, [row]);
+getSignalsSheet_ = () => sheet;
+const receipt = updateSignalEvaluationUnlocked_({
+  signal_id: 7,
+  activated_at: "2026-08-02T10:01:00Z",
+  evaluated_at: "2026-08-02T10:05:00Z",
+  outcome: "target_hit",
+  max_favorable_price: 111,
+  max_adverse_price: 99,
+  result_R: 2,
+  baseline_R: 1,
+  edge_R: 1,
+});
+const saved = rowObject_(headers, sheet.bodyRows()[0]);
+console.log(JSON.stringify({ receipt, saved, stats: sheet.stats() }));
+"""
+        )
+
+        self.assertTrue(result["receipt"]["updated"])
+        self.assertEqual(result["saved"]["custom_note"], "keep me")
+        self.assertEqual(result["saved"]["outcome"], "target_hit")
+        self.assertEqual(result["saved"]["edge_R"], 1)
+        self.assertEqual(result["stats"]["setValues"], 1)
+        self.assertEqual(result["stats"]["setValue"], 0)
+
+    def test_evaluation_update_preserves_untouched_formula_cells(self):
+        result = _run_case(
+            """
+const headers = ["custom_formula"].concat(SIGNAL_COLUMNS);
+const values = [
+  headers,
+  mappedRow_(headers, {
+    custom_formula: 42,
+    id: 7,
+    outcome: "not_enough_data",
+  }),
+];
+const formulas = [
+  headers.map(() => ""),
+  mappedRow_(headers, { custom_formula: "=SUM(20,22)" }),
+];
+let saved = null;
+const sheet = {
+  getDataRange: () => ({
+    getValues: () => values.map((row) => row.slice()),
+    getFormulas: () => formulas.map((row) => row.slice()),
+  }),
+  getRange: () => ({
+    setValues: (rows) => { saved = rows[0].slice(); },
+  }),
+};
+getSignalsSheet_ = () => sheet;
+updateSignalEvaluationUnlocked_({
+  signal_id: 7,
+  evaluated_at: "2026-08-02T10:05:00Z",
+  outcome: "target_hit",
+  max_favorable_price: 111,
+  max_adverse_price: 99,
+  result_R: 2,
+  baseline_R: 1,
+  edge_R: 1,
+});
+console.log(JSON.stringify({ saved: rowObject_(headers, saved) }));
+"""
+        )
+
+        self.assertEqual(result["saved"]["custom_formula"], "=SUM(20,22)")
+        self.assertEqual(result["saved"]["outcome"], "target_hit")
+
+    def test_exact_terminal_evaluation_replay_does_not_write_again(self):
+        result = _run_case(
+            """
+const payload = {
+  signal_id: 7,
+  activated_at: "2026-08-02T10:01:00Z",
+  evaluated_at: "2026-08-02T10:05:00Z",
+  outcome: "target_hit",
+  max_favorable_price: 111,
+  max_adverse_price: 99,
+  result_R: 2,
+  baseline_R: 1,
+  edge_R: 1,
+};
+const row = mappedRow_(SIGNAL_COLUMNS, Object.assign(
+  { id: 7 },
+  payload,
+  { evaluated_at: "2026-08-02T10:04:00Z" }
+));
+const sheet = inMemorySheet_(SIGNAL_COLUMNS, [row]);
+getSignalsSheet_ = () => sheet;
+const replay = updateSignalEvaluationUnlocked_(payload);
+console.log(JSON.stringify({ replay, stats: sheet.stats() }));
+"""
+        )
+
+        self.assertTrue(result["replay"]["updated"])
+        self.assertTrue(result["replay"].get("replayed", False))
+        self.assertEqual(result["stats"], {"setValues": 0, "setValue": 0})
+
+    def test_conflicting_terminal_evaluation_is_rejected_without_a_write(self):
+        result = _run_case(
+            """
+const row = mappedRow_(SIGNAL_COLUMNS, {
+  id: 7,
+  activated_at: "2026-08-02T10:01:00Z",
+  evaluated_at: "2026-08-02T10:05:00Z",
+  outcome: "target_hit",
+  max_favorable_price: 111,
+  max_adverse_price: 99,
+  result_R: 2,
+  baseline_R: 1,
+  edge_R: 1,
+});
+const sheet = inMemorySheet_(SIGNAL_COLUMNS, [row]);
+getSignalsSheet_ = () => sheet;
+let error = "";
+try {
+  updateSignalEvaluationUnlocked_({
+    signal_id: 7,
+    activated_at: "2026-08-02T10:01:00Z",
+    evaluated_at: "2026-08-02T10:06:00Z",
+    outcome: "stop_hit",
+    max_favorable_price: 111,
+    max_adverse_price: 94,
+    result_R: -1,
+    baseline_R: -1,
+    edge_R: 0,
+  });
+} catch (caught) {
+  error = String(caught.message || caught);
+}
+const saved = rowObject_(SIGNAL_COLUMNS, sheet.bodyRows()[0]);
+console.log(JSON.stringify({ error, outcome: saved.outcome, stats: sheet.stats() }));
+"""
+        )
+
+        self.assertIn("conflicting terminal signal evaluation", result["error"])
+        self.assertEqual(result["outcome"], "target_hit")
+        self.assertEqual(result["stats"], {"setValues": 0, "setValue": 0})
+
+    def test_widened_legacy_sheet_expands_before_header_read_and_append(self):
+        result = _run_case(
+            """
+const sheet = inMemorySheet_(["a", "custom", ""], [], { maxColumns: 3 });
+const spreadsheet = {
+  getSheetByName: () => sheet,
+  insertSheet: () => { throw new Error("unexpected insertSheet"); },
+};
+globalThis.PropertiesService = {
+  getScriptProperties: () => ({ getProperty: () => "" }),
+};
+globalThis.SpreadsheetApp = {
+  getActiveSpreadsheet: () => spreadsheet,
+};
+let error = "";
+try {
+  getConfiguredSheet_("legacy", ["a", "b", "c", "d", "e"]);
+} catch (caught) {
+  error = String(caught.message || caught);
+}
+console.log(JSON.stringify({
+  error,
+  headers: sheet.snapshot()[0],
+  maxColumns: sheet.getMaxColumns(),
+}));
+"""
+        )
+
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["headers"], ["a", "custom", "b", "c", "d", "e"])
+        self.assertEqual(result["maxColumns"], 6)
+
+    def test_older_or_equal_active_setup_delivery_is_a_noop(self):
+        result = _run_case(
+            """
+const rows = [
+  setupRow_("WATCH", "watch-1", "2026-08-02T10:00:00Z"),
+  setupRow_("ARMED", "armed-1", "2026-08-02T10:10:00Z"),
+];
+const sheet = inMemorySheet_(SETUP_COLUMNS, rows);
+getSetupsSheet_ = () => sheet;
+const stale = setupPayload_("WATCH", "2026-08-02T10:05:00Z");
+const older = saveSetupEventUnlocked_(stale, "watch-stale-new-fingerprint");
+const equal = saveSetupEventUnlocked_(
+  setupPayload_("WATCH", "2026-08-02T10:10:00Z"),
+  "watch-equal-new-fingerprint"
+);
+console.log(JSON.stringify({ older, equal, rows: sheet.bodyRows().length }));
+"""
+        )
+
+        self.assertFalse(result["older"]["inserted"])
+        self.assertFalse(result["equal"]["inserted"])
+        self.assertEqual(result["rows"], 2)
+
+    def test_terminal_setup_never_returns_to_a_newer_active_state(self):
+        result = _run_case(
+            """
+const rows = [
+  setupRow_("TRIGGERED", "triggered-1", "2026-08-02T10:10:00Z"),
+  setupRow_("TARGET_HIT", "target-1", "2026-08-02T10:20:00Z"),
+];
+const sheet = inMemorySheet_(SETUP_COLUMNS, rows);
+getSetupsSheet_ = () => sheet;
+const active = setupPayload_("ARMED", "2026-08-02T10:30:00Z");
+const receipt = saveSetupEventUnlocked_(active, "armed-after-terminal");
+console.log(JSON.stringify({ receipt, rows: sheet.bodyRows().length }));
+"""
+        )
+
+        self.assertFalse(result["receipt"]["inserted"])
+        self.assertEqual(result["rows"], 2)
+
+    def test_different_terminal_setup_for_the_same_event_is_rejected(self):
+        result = _run_case(
+            """
+const sheet = inMemorySheet_(SETUP_COLUMNS, [
+  setupRow_("TARGET_HIT", "target-1", "2026-08-02T10:20:00Z"),
+]);
+getSetupsSheet_ = () => sheet;
+let error = "";
+try {
+  saveSetupEventUnlocked_(
+    setupPayload_("STOPPED", "2026-08-02T10:21:00Z"),
+    "stopped-conflict"
+  );
+} catch (caught) {
+  error = String(caught.message || caught);
+}
+console.log(JSON.stringify({ error, rows: sheet.bodyRows().length }));
+"""
+        )
+
+        self.assertIn("conflicting terminal setup state", result["error"])
+        self.assertEqual(result["rows"], 1)
+
+    def test_newer_active_and_terminal_setup_transitions_are_persisted(self):
+        result = _run_case(
+            """
+const sheet = inMemorySheet_(SETUP_COLUMNS, [
+  setupRow_("WATCH", "watch-1", "2026-08-02T10:00:00Z"),
+]);
+getSetupsSheet_ = () => sheet;
+const armed = saveSetupEventUnlocked_(
+  setupPayload_("ARMED", "2026-08-02T10:10:00Z"),
+  "armed-1"
+);
+const terminal = saveSetupEventUnlocked_(
+  setupPayload_("INVALIDATED", "2026-08-02T10:20:00Z"),
+  "invalidated-1"
+);
+console.log(JSON.stringify({ armed, terminal, rows: sheet.bodyRows().length }));
+"""
+        )
+
+        self.assertTrue(result["armed"]["inserted"])
+        self.assertTrue(result["terminal"]["inserted"])
+        self.assertEqual(result["rows"], 3)
+
+
 def _run_case(case_source: str) -> dict[str, object]:
     helper = r"""
+globalThis.LockService = {
+  getScriptLock: () => ({
+    tryLock: () => true,
+    releaseLock: () => {},
+  }),
+};
+
 function schedulerReceipt_(phase, status, observedAt) {
   return {
     schema_version: "scheduler-receipt/v1",
@@ -246,6 +631,203 @@ function schedulerRunRow_(eventName, mode, status, finishedAt) {
     started_at: finishedAt,
     finished_at: finishedAt,
     updated_at: finishedAt,
+  };
+}
+
+function inMemorySheet_(headers, rows, options) {
+  const settings = options || {};
+  const data = [headers.slice()].concat((rows || []).map((row) => row.slice()));
+  let maxColumns = settings.maxColumns || Math.max(headers.length, 1);
+  let setValuesCalls = 0;
+  let setValueCalls = 0;
+  let failNextSetValues = false;
+
+  function lastNonEmptyIndex_(row) {
+    for (let index = row.length - 1; index >= 0; index -= 1) {
+      if (row[index] !== "" && row[index] !== null && row[index] !== undefined) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  function ensureRow_(rowIndex) {
+    while (data.length <= rowIndex) {
+      data.push([]);
+    }
+  }
+
+  function getRange_(row, column, rowCount, columnCount) {
+    const height = rowCount || 1;
+    const width = columnCount || 1;
+    if (row < 1 || column < 1 || height < 1 || width < 1) {
+      throw new Error("invalid range");
+    }
+    if (column + width - 1 > maxColumns) {
+      throw new Error("range exceeds sheet column capacity");
+    }
+    return {
+      getValues: () => Array.from({ length: height }, (_, rowOffset) => (
+        Array.from({ length: width }, (_, columnOffset) => {
+          const source = data[row - 1 + rowOffset] || [];
+          const value = source[column - 1 + columnOffset];
+          return value === undefined ? "" : value;
+        })
+      )),
+      getFormulas: () => Array.from(
+        { length: height },
+        () => Array(width).fill("")
+      ),
+      setValues: (values) => {
+        setValuesCalls += 1;
+        if (failNextSetValues) {
+          failNextSetValues = false;
+          throw new Error("injected setValues failure");
+        }
+        if (values.length !== height || values.some((valueRow) => valueRow.length !== width)) {
+          throw new Error("setValues dimension mismatch");
+        }
+        values.forEach((valueRow, rowOffset) => {
+          const targetRow = row - 1 + rowOffset;
+          ensureRow_(targetRow);
+          valueRow.forEach((value, columnOffset) => {
+            data[targetRow][column - 1 + columnOffset] = value;
+          });
+        });
+      },
+      setValue: (value) => {
+        setValueCalls += 1;
+        ensureRow_(row - 1);
+        data[row - 1][column - 1] = value;
+      },
+    };
+  }
+
+  return {
+    getMaxColumns: () => maxColumns,
+    getLastColumn: () => data.reduce(
+      (maximum, row) => Math.max(maximum, lastNonEmptyIndex_(row) + 1),
+      0
+    ),
+    getLastRow: () => {
+      for (let index = data.length - 1; index >= 0; index -= 1) {
+        if (lastNonEmptyIndex_(data[index]) >= 0) {
+          return index + 1;
+        }
+      }
+      return 0;
+    },
+    insertColumnsAfter: (afterPosition, howMany) => {
+      if (afterPosition < 1 || afterPosition > maxColumns || howMany < 1) {
+        throw new Error("invalid column insertion");
+      }
+      data.forEach((row) => {
+        while (row.length < afterPosition) {
+          row.push("");
+        }
+        row.splice(afterPosition, 0, ...Array(howMany).fill(""));
+      });
+      maxColumns += howMany;
+    },
+    getRange: getRange_,
+    getDataRange: () => getRange_(
+      1,
+      1,
+      Math.max(1, data.length),
+      Math.max(1, data.reduce(
+        (maximum, row) => Math.max(maximum, lastNonEmptyIndex_(row) + 1),
+        0
+      ))
+    ),
+    failNextSetValues: () => { failNextSetValues = true; },
+    bodyRows: () => data.slice(1).filter((row) => row.some((value) => value !== "")),
+    snapshot: () => data.map((row) => row.slice(0, maxColumns)),
+    stats: () => ({ setValues: setValuesCalls, setValue: setValueCalls }),
+  };
+}
+
+function mappedRow_(headers, values) {
+  return headers.map((header) => (
+    Object.prototype.hasOwnProperty.call(values, header) ? values[header] : ""
+  ));
+}
+
+function rowObject_(headers, row) {
+  const result = {};
+  headers.forEach((header, index) => { result[header] = row[index]; });
+  return result;
+}
+
+function setupPayload_(status, createdAt) {
+  return {
+    setup_id: "setup-1",
+    event_id: "event-1",
+    symbol: "BTCUSDT",
+    pattern: "breakout_retest",
+    direction: "LONG",
+    status: status,
+    regime: "uptrend",
+    current_price: 100,
+    trigger_level: 101,
+    entry_low: 101,
+    entry_high: 102,
+    stop: 98,
+    targets: [106, 109],
+    risk_reward: 1.5,
+    score: 75,
+    action: "test action",
+    reason: "test reason",
+    invalidation: "test invalidation",
+    conditions: [],
+    created_at: createdAt,
+    detected_at: "2026-08-02T10:00:00Z",
+    triggered_at: status === "TRIGGERED" ? createdAt : "",
+    expires_at: "2026-08-02T22:00:00Z",
+    source: "actionable_setup",
+    policy_version: "v3.1",
+    market_source: "binance_usdm_public",
+  };
+}
+
+function setupRow_(status, fingerprint, createdAt) {
+  const setup = setupPayload_(status, createdAt);
+  const values = Object.assign({}, setup, {
+    targets_json: JSON.stringify(setup.targets),
+    conditions_json: JSON.stringify(setup.conditions),
+    fingerprint: fingerprint,
+  });
+  return mappedRow_(SETUP_COLUMNS, values);
+}
+
+function triggeredPayload_() {
+  const setup = setupPayload_("TRIGGERED", "2026-08-02T10:10:00Z");
+  return {
+    fingerprint: "triggered-1",
+    setup: setup,
+    signal: {
+      created_at: setup.created_at,
+      symbol: setup.symbol,
+      interval: "15m",
+      direction: setup.direction,
+      market_regime: setup.regime,
+      close_price: setup.current_price,
+      entry_zone: "101-102",
+      stop: setup.stop,
+      targets: setup.targets,
+      risk_reward: setup.risk_reward,
+      confidence: "medium",
+      invalidation: setup.invalidation,
+      reasons: [setup.reason],
+      source: "actionable_alert",
+      setup_id: setup.setup_id,
+      setup_status: setup.status,
+      expires_at: setup.expires_at,
+      event_id: setup.event_id,
+      policy_version: setup.policy_version,
+      detected_at: setup.detected_at,
+      triggered_at: setup.triggered_at,
+      market_source: setup.market_source,
+    },
   };
 }
 """

@@ -5,6 +5,14 @@ const SCHEDULER_SCHEMA_VERSION = "scheduler-receipt/v1";
 const SCHEDULER_TERMINAL_STATUSES = Object.freeze(["success", "failure", "cancelled"]);
 const SCHEDULER_STEP_RESULTS = Object.freeze(["", "success", "failure", "cancelled", "skipped"]);
 const SCHEDULER_STATUS_WINDOW_ROWS = 2000;
+const SETUP_TERMINAL_STATUSES = Object.freeze([
+  "INVALIDATED",
+  "TARGET_HIT",
+  "STOPPED",
+  "EXPIRED",
+  "TIMED_OUT",
+]);
+const SETUP_ACTIVE_STATUSES = Object.freeze(["WATCH", "ARMED", "TRIGGERED"]);
 const SIGNAL_COLUMNS = [
   "id",
   "created_at",
@@ -254,8 +262,17 @@ function saveTriggeredEvent_(payload) {
     if (!signalEventId || signalEventId !== setupEventId) {
       return { ok: false, error: "triggered signal/setup event_id mismatch" };
     }
-    const signalReceipt = saveSignalUnlocked_(signal);
     const setupReceipt = saveSetupEventUnlocked_(setup, payload.fingerprint);
+    if (setupReceipt.stale) {
+      return {
+        ok: true,
+        signal_inserted: false,
+        setup_inserted: false,
+        stale: true,
+        event_id: signalEventId,
+      };
+    }
+    const signalReceipt = saveSignalUnlocked_(signal);
     return {
       ok: true,
       signal_inserted: signalReceipt.inserted,
@@ -296,7 +313,9 @@ function updateSignalEvaluation_(payload) {
 
 function updateSignalEvaluationUnlocked_(payload) {
   const sheet = getSignalsSheet_();
-  const values = sheet.getDataRange().getValues();
+  const dataRange = sheet.getDataRange();
+  const values = dataRange.getValues();
+  const formulas = dataRange.getFormulas();
   const headers = values[0].map((value) => String(value).trim());
   const idColumn = requiredColumnIndex_(headers, "id");
   const updates = {
@@ -313,9 +332,30 @@ function updateSignalEvaluationUnlocked_(payload) {
   for (let index = 1; index < values.length; index += 1) {
     if (Number(values[index][idColumn]) === Number(payload.signal_id)) {
       const rowNumber = index + 1;
-      Object.keys(updates).forEach((column) => {
-        sheet.getRange(rowNumber, requiredColumnIndex_(headers, column) + 1).setValue(updates[column]);
-      });
+      const currentRow = values[index];
+      const currentOutcome = currentRow[requiredColumnIndex_(headers, "outcome")];
+      if (isTerminalSignalOutcome_(currentOutcome)) {
+        const semanticColumns = Object.keys(updates).filter((column) => column !== "evaluated_at");
+        const exactReplay = semanticColumns.every((column) => (
+          sameSheetValue_(currentRow[requiredColumnIndex_(headers, column)], updates[column])
+        ));
+        if (!exactReplay) {
+          throw new Error("conflicting terminal signal evaluation");
+        }
+        return {
+          ok: true,
+          updated: true,
+          replayed: true,
+          id: Number(payload.signal_id),
+        };
+      }
+      updateMappedRow_(
+        sheet,
+        rowNumber,
+        headers,
+        rowWithFormulas_(currentRow, formulas[index] || []),
+        updates
+      );
       return { ok: true, updated: true, id: Number(payload.signal_id) };
     }
   }
@@ -593,12 +633,21 @@ function ensureColumns_(sheet, headers, expectedColumns) {
     }
   });
   const startColumn = lastNamedColumn + 1;
+  ensureSheetColumnCapacity_(sheet, startColumn + missing.length - 1);
   sheet.getRange(1, startColumn, 1, missing.length).setValues([missing]);
 }
 
 function readHeaders_(sheet, minimumColumns) {
   const width = Math.max(Number(sheet.getLastColumn()) || 0, minimumColumns || 1);
+  ensureSheetColumnCapacity_(sheet, width);
   return sheet.getRange(1, 1, 1, width).getValues()[0].map((value) => String(value).trim());
+}
+
+function ensureSheetColumnCapacity_(sheet, requiredColumns) {
+  const maximumColumns = Number(sheet.getMaxColumns()) || 0;
+  if (maximumColumns < requiredColumns) {
+    sheet.insertColumnsAfter(maximumColumns, requiredColumns - maximumColumns);
+  }
 }
 
 function appendMappedRow_(sheet, expectedColumns, values) {
@@ -645,6 +694,10 @@ function saveSetupEventUnlocked_(setup, fingerprint) {
   const sheet = getSetupsSheet_();
   const rows = readRows_(sheet);
   const eventId = setup.event_id || setup.setup_id || "";
+  const activeEventId = canonicalActiveSetupEventId_(rows, setup);
+  if (activeEventId && String(activeEventId) !== String(eventId)) {
+    return { ok: true, inserted: false, stale: true };
+  }
   const sameSetupRows = rows.filter(
     (row) => String(row.event_id || row.setup_id || "") === String(eventId)
   );
@@ -654,6 +707,18 @@ function saveSetupEventUnlocked_(setup, fingerprint) {
   );
   if (exists) {
     return { ok: true, inserted: false };
+  }
+  const incomingStatus = String(setup.status || "");
+  const existingTerminal = sameSetupRows.find((row) => isTerminalSetupStatus_(row.status));
+  if (existingTerminal) {
+    if (isTerminalSetupStatus_(incomingStatus)) {
+      throw new Error("conflicting terminal setup state");
+    }
+    return { ok: true, inserted: false, stale: true };
+  }
+  const latest = latestSetupStateRow_(sameSetupRows);
+  if (latest && !isLaterSetupState_(setup, latest)) {
+    return { ok: true, inserted: false, stale: true };
   }
   appendMappedRow_(sheet, SETUP_COLUMNS, [
     setup.setup_id || "",
@@ -1203,6 +1268,74 @@ function parsePayload_(e) {
 
 function getProperty_(name) {
   return PropertiesService.getScriptProperties().getProperty(name) || "";
+}
+
+function isTerminalSignalOutcome_(value) {
+  const outcome = String(value || "");
+  return outcome !== "" && outcome !== "not_enough_data";
+}
+
+function sameSheetValue_(left, right) {
+  return String(nullable_(left)) === String(nullable_(right));
+}
+
+function rowWithFormulas_(values, formulas) {
+  return values.map((value, index) => formulas[index] || value);
+}
+
+function isTerminalSetupStatus_(value) {
+  return SETUP_TERMINAL_STATUSES.includes(String(value || ""));
+}
+
+function canonicalActiveSetupEventId_(rows, setup) {
+  const setupId = String(setup.setup_id || "");
+  if (!setupId) {
+    return "";
+  }
+  const policyVersion = String(setup.policy_version || "legacy_unversioned");
+  const latestByEvent = {};
+  rows.forEach((row) => {
+    if (
+      String(row.setup_id || "") !== setupId ||
+      String(row.policy_version || "legacy_unversioned") !== policyVersion
+    ) {
+      return;
+    }
+    const rowEventId = String(row.event_id || row.setup_id || "");
+    const current = latestByEvent[rowEventId];
+    latestByEvent[rowEventId] = latestSetupStateRow_(current ? [current, row] : [row]);
+  });
+  return Object.keys(latestByEvent).find(
+    (rowEventId) => SETUP_ACTIVE_STATUSES.includes(String(latestByEvent[rowEventId].status || ""))
+  ) || "";
+}
+
+function latestSetupStateRow_(rows) {
+  return rows.reduce((latest, row) => {
+    if (!latest) {
+      return row;
+    }
+    const rowTime = setupStateTimestamp_(row);
+    const latestTime = setupStateTimestamp_(latest);
+    if (rowTime === null) {
+      return latestTime === null ? row : latest;
+    }
+    return latestTime === null || rowTime >= latestTime ? row : latest;
+  }, null);
+}
+
+function isLaterSetupState_(incoming, latest) {
+  const incomingTime = setupStateTimestamp_(incoming);
+  const latestTime = setupStateTimestamp_(latest);
+  if (incomingTime === null) {
+    return false;
+  }
+  return latestTime === null || incomingTime > latestTime;
+}
+
+function setupStateTimestamp_(setup) {
+  const timestamp = Date.parse(String(setup.created_at || ""));
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function withScriptLock_(operation) {

@@ -172,6 +172,16 @@ def _run_setup_check(
 
     for symbol in args.symbols:
         try:
+            for setup in previous:
+                if setup.symbol != symbol or setup.status != TRIGGERED:
+                    continue
+                signal_inserted, _ = save_triggered_event(
+                    setup,
+                    setup_to_signal(setup),
+                    journal_path,
+                )
+                if signal_inserted:
+                    paper_entries += 1
             market = load_live_market_data(
                 symbol=symbol,
                 intervals=args.intervals,

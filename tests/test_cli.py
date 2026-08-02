@@ -342,6 +342,64 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status["state_changes"], 1)
         self.assertEqual(status["paper_entries"], 0)
 
+    def test_setup_check_repairs_persisted_trigger_before_market_reconciliation(self):
+        output = io.StringIO()
+        triggered = SimpleNamespace(status="TRIGGERED", symbol="BTCUSDT")
+        signal = SimpleNamespace(symbol="BTCUSDT")
+        operations = []
+
+        def repair(*args, **kwargs):
+            operations.append("repair")
+            return True, False
+
+        def load_market(*args, **kwargs):
+            operations.append("market")
+            return {"symbol": "BTCUSDT"}
+
+        def reconcile(*args, **kwargs):
+            operations.append("reconcile")
+            return []
+
+        with patch("signalpilot.cli.load_latest_setups", return_value=[triggered]):
+            with patch("signalpilot.cli.setup_to_signal", return_value=signal):
+                with patch("signalpilot.cli.save_triggered_event", side_effect=repair):
+                    with patch("signalpilot.cli.load_live_market_data", side_effect=load_market):
+                        with patch("signalpilot.cli.analyze_actionable_setup", return_value=None):
+                            with patch("signalpilot.cli.reconcile_setup_state", side_effect=reconcile):
+                                with redirect_stdout(output):
+                                    exit_code = main(["--setup-check", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(operations, ["repair", "market", "reconcile"])
+        self.assertEqual(json.loads(output.getvalue())["paper_entries"], 1)
+
+    def test_setup_check_stops_symbol_when_trigger_repair_fails(self):
+        output = io.StringIO()
+        triggered = SimpleNamespace(status="TRIGGERED", symbol="BTCUSDT")
+
+        with patch("signalpilot.cli.load_latest_setups", return_value=[triggered]):
+            with patch("signalpilot.cli.setup_to_signal", return_value=SimpleNamespace()):
+                with patch(
+                    "signalpilot.cli.save_triggered_event",
+                    side_effect=RuntimeError("repair failed"),
+                ):
+                    with patch(
+                        "signalpilot.cli.load_live_market_data",
+                        side_effect=AssertionError("market reconciliation must not run"),
+                    ):
+                        with patch(
+                            "signalpilot.cli.reconcile_setup_state",
+                            side_effect=AssertionError("state reconciliation must not run"),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = main(["--setup-check", "--symbols", "BTCUSDT"])
+
+        self.assertEqual(exit_code, 1)
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["checked_symbols"], [])
+        self.assertEqual(status["failed_symbols"], ["BTCUSDT"])
+        self.assertIn("repair failed", status["failures"][0]["error"])
+
     def test_setup_check_preserves_successful_symbols_when_one_symbol_fails(self):
         output = io.StringIO()
         event = SimpleNamespace(status="ARMED")
